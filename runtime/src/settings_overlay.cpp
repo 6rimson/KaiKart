@@ -1839,7 +1839,14 @@ bool g_consoleReturnRequested = false;
 
 // Runs between frames. The launcher lives in this process, so graphics has to shut down for real:
 // what it keeps allocated would still be allocated for the next launch.
+#if defined(MKW_KAIHEN)
+extern "C" [[noreturn]] void kaihen_quit(const char* why);
+#endif
 [[noreturn]] void ConsoleReturnToLauncher() noexcept {
+#if defined(MKW_KAIHEN)
+    // kaiHEN: the app ends through the applet manager (kaihen/platform/kaihen_platform.c).
+    kaihen_quit("quit from the menu");
+#endif
     RT_LOGF("perf", "returning to the launcher\n");
     if (hbxl_cpu_clock_restore != nullptr) {
         hbxl_cpu_clock_restore();  // the CPU back to its launch rate if CPU boost raised it
@@ -1898,10 +1905,12 @@ void ConsoleMenuInput(int rows) {
         now[i] = SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(i));
     }
     const auto pressed = [&](SDL_GamepadButton button) { return now[button] && !g_consoleButtons[button]; };
+#if !defined(MKW_KAIHEN)  // kaiHEN: no SmileBASIC behind the game, so Plus is the game's pause
     if (pressed(SDL_GAMEPAD_BUTTON_START) && !g_consoleLinkLost) {
         g_consoleLinkLost = true;
         RT_LOGF("perf", "Plus pressed: the launcher link will stop\n");
     }
+#endif
     if (!g_rebind.active) {
         // L + R + right stick click: Minus is the game's pause, and Plus must stay unused.
         if (now[SDL_GAMEPAD_BUTTON_LEFT_SHOULDER] && now[SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER] &&
@@ -2039,7 +2048,11 @@ void DrawConsoleMenu() {
         row(rows - 2, "Reset buttons to default");
         row(rows - 1, g_consoleLinkLost   ? "Launcher link lost: quit with HOME"
                       : g_consoleExitArmed ? "Press A again to quit"
+#if defined(MKW_KAIHEN)
+                                           : "Quit");
+#else
                                            : "Return to launcher");
+#endif
         ImGui::Separator();
         ImGui::TextDisabled("D-pad: move, change. A: rebind. B: close.");
         DrawRebindPrompt();

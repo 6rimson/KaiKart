@@ -5,7 +5,8 @@
  *   - the screen: libnx's default NWindow, which Dawn presents to through VK_NN_vi_surface;
  *   - Vulkan: OunceVK, linked in;
  *   - the CPU clock: clkrst, directly (the app may use it on kaiHEN);
- *   - input and audio: not yet (the HBLauncher SDL drivers see no hbx context and stay quiet). */
+ *   - input and audio: SDL's HBLauncher drivers, fed from libnx (hid and audout) through an
+ *     hbx context of this file's own. */
 #include <errno.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -21,10 +22,14 @@
 #include <vulkan/vulkan.h>
 
 #include "hbx_app.h" /* HBLauncher SDK: struct hbx_ctx, struct hbx_input_state */
+#include "hbx_sdk.h"
 
 #define KAIHEN_ROOT "sdmc:/wiicompiled"
 
-const struct hbx_ctx *hbxl_ctx; /* no HBLauncher context: SDL's hbx audio driver declines */
+/* SDL's HBLauncher drivers read this: the joystick driver needs it set, the audio driver calls
+ * its audio table (filled below). Nothing else in it is used. */
+static struct hbx_ctx g_ctx;
+const struct hbx_ctx *hbxl_ctx = &g_ctx;
 
 static FILE *g_log;
 static int g_nxlink = -1;
@@ -109,9 +114,8 @@ void userAppInit(void) {
     setvbuf(stderr, NULL, _IONBF, 0);
     load_settings();
     /* As HBLauncher's environment: SDL draws nothing itself (aurora presents through Dawn to the
-     * NWindow), so its offscreen video driver. No audio driver yet (milestone 3). hbxl-env wins. */
+     * NWindow), so its offscreen video driver. hbxl-env wins. */
     setenv("SDL_VIDEO_DRIVER", "offscreen", 0);
-    setenv("SDL_AUDIO_DRIVER", "dummy", 0);
     if (chdir(KAIHEN_ROOT) != 0)
         fprintf(stderr, "[kaihen] no %s on the card (%d)\n", KAIHEN_ROOT, errno);
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
@@ -166,11 +170,122 @@ void *hbxl_sdk_memalign(size_t align, size_t size) {
 
 void hbxl_sdk_free(void *p) { free(p); }
 
-/* --- input (milestone 3) ------------------------------------------------------------------ */
+/* --- input: the controller, through libnx ------------------------------------------------ */
+/* Player 1 or handheld, as the HBLauncher SDK reported them: HBX_* bits, sticks -100..100 with +y
+ * up, a small deadzone. SDL's hbx joystick driver turns this into a Switch Pro style gamepad. */
+
+static int32_t stick_axis(s32 value) {
+    int32_t v = (int32_t)((int64_t)value * 100 / 32767);
+    if (v > -8 && v < 8)
+        return 0;
+    return v > 100 ? 100 : v < -100 ? -100 : v;
+}
 
 void hbx_input_poll(const struct hbx_ctx *ctx, struct hbx_input_state *state) {
+    static PadState pad;
+    static int ready;
     (void)ctx;
-    memset(state, 0, sizeof *state);
+    if (!ready) {
+        padInitializeDefault(&pad);
+        ready = 1;
+    }
+    padUpdate(&pad);
+    static const struct { u64 nx; uint32_t hbx; } map[] = {
+        {HidNpadButton_A, HBX_A},         {HidNpadButton_B, HBX_B},
+        {HidNpadButton_X, HBX_X},         {HidNpadButton_Y, HBX_Y},
+        {HidNpadButton_L, HBX_L},         {HidNpadButton_R, HBX_R},
+        {HidNpadButton_ZL, HBX_ZL},       {HidNpadButton_ZR, HBX_ZR},
+        {HidNpadButton_Plus, HBX_PLUS},   {HidNpadButton_Minus, HBX_MINUS},
+        {HidNpadButton_StickL, HBX_STICK_L}, {HidNpadButton_StickR, HBX_STICK_R},
+        {HidNpadButton_Up, HBX_UP},       {HidNpadButton_Down, HBX_DOWN},
+        {HidNpadButton_Left, HBX_LEFT},   {HidNpadButton_Right, HBX_RIGHT},
+    };
+    const u64 held = padGetButtons(&pad);
+    uint32_t buttons = 0;
+    for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
+        if (held & map[i].nx)
+            buttons |= map[i].hbx;
+    const HidAnalogStickState left = padGetStickPos(&pad, 0), right = padGetStickPos(&pad, 1);
+    state->pressed = buttons & ~state->previous;
+    state->released = state->previous & ~buttons;
+    state->previous = buttons;
+    state->buttons = buttons;
+    state->stick_lx = stick_axis(left.x);
+    state->stick_ly = stick_axis(left.y);
+    state->stick_rx = stick_axis(right.x);
+    state->stick_ry = stick_axis(right.y);
+    state->connected = padIsConnected(&pad) ? 1 : 0;
+    state->touch_count = 0;
+}
+
+/* --- audio: audout, behind the AudioOut table SDL's hbx driver calls ------------------------- */
+/* The driver keeps the "object" and descriptors in its own memory; here a descriptor is a libnx
+ * AudioOutBuffer (40 of its 64 bytes) and the object is unused: there is one AudioOut. */
+
+_Static_assert(sizeof(AudioOutBuffer) <= 0x40, "AudioOutBuffer fits a descriptor");
+
+static void audio_initialize_parameter(void *parameter) { (void)parameter; }
+
+static int32_t audio_open(void *object, const void *parameter) {
+    (void)object, (void)parameter;
+    const Result rc = audoutInitialize();
+    if (R_FAILED(rc))
+        fprintf(stderr, "[kaihen] audout: %x\n", rc);
+    return R_SUCCEEDED(rc) ? 0 : -1;
+}
+
+static int32_t audio_sample_rate(void *object) { (void)object; return (int32_t)audoutGetSampleRate(); }
+static int32_t audio_channel_count(void *object) { (void)object; return (int32_t)audoutGetChannelCount(); }
+static int32_t audio_sample_format(void *object) { (void)object; return (int32_t)audoutGetPcmFormat(); }
+
+static void audio_set_buffer_info(void *descriptor, const void *pcm, uint64_t capacity, uint64_t size) {
+    AudioOutBuffer *buffer = descriptor;
+    memset(buffer, 0, sizeof *buffer);
+    buffer->buffer = (void *)pcm;
+    buffer->buffer_size = capacity;
+    buffer->data_size = size;
+}
+
+static int32_t audio_append(void *object, void *descriptor) {
+    (void)object;
+    return R_SUCCEEDED(audoutAppendAudioOutBuffer(descriptor)) ? 1 : 0;
+}
+
+static int32_t audio_start(void *object) { (void)object; return R_SUCCEEDED(audoutStartAudioOut()) ? 0 : -1; }
+static int32_t audio_stop(void *object) { (void)object; return R_SUCCEEDED(audoutStopAudioOut()) ? 0 : -1; }
+static int32_t audio_nothing(void *object) { (void)object; return 0; }
+
+static void *audio_released(void *object) {
+    (void)object;
+    AudioOutBuffer *released = NULL;
+    u32 count = 0;
+    if (R_FAILED(audoutGetReleasedAudioOutBuffer(&released, &count)) || count == 0)
+        return NULL;
+    return released;
+}
+
+static int32_t audio_close(void *object) {
+    (void)object;
+    audoutExit();
+    return 0;
+}
+
+__attribute__((constructor)) static void fill_audio_table(void) {
+    g_ctx.audio = (struct hbx_audio){
+        .initialize_parameter = (uintptr_t)audio_initialize_parameter,
+        .open_default_audio_out = (uintptr_t)audio_open,
+        .sample_rate = (uintptr_t)audio_sample_rate,
+        .channel_count = (uintptr_t)audio_channel_count,
+        .sample_format = (uintptr_t)audio_sample_format,
+        .set_buffer_info = (uintptr_t)audio_set_buffer_info,
+        .append_buffer = (uintptr_t)audio_append,
+        .start = (uintptr_t)audio_start,
+        .stop = (uintptr_t)audio_stop,
+        .buffer_count = (uintptr_t)audio_nothing,
+        .flush_buffers = (uintptr_t)audio_nothing,
+        .released_buffer = (uintptr_t)audio_released,
+        .close = (uintptr_t)audio_close,
+    };
 }
 
 /* --- CPU clock ----------------------------------------------------------------------------- */
@@ -320,25 +435,20 @@ void __wrap___cxa_throw(void *object, void *type, void (*destructor)(void *)) {
     __real___cxa_throw(object, type, destructor);
 }
 
-/* --- leaving after a failure (link: --wrap=exit) --------------------------------------------- */
-/* A failing exit ends the process at once: tearing the game down while its GPU and worker threads
- * still run crashes ("the software needed to close"). A normal exit goes the usual way. */
+/* --- leaving (link: --wrap=exit, --wrap=_exit) ----------------------------------------------- */
+/* Every exit ends the process through quit_now: tearing the game down while its GPU and worker
+ * threads still run crashes ("the software needed to close"). */
 
-void __real_exit(int status) __attribute__((noreturn));
+void kaihen_quit(const char *why) { quit_now(why); }
 
 void __wrap_exit(int status) {
-    if (status == 0)
-        __real_exit(0);
-    quit_now(status == 1 ? "exit(1)" : "exit(failure)");
+    quit_now(status == 0 ? "exit(0)" : status == 1 ? "exit(1)" : "exit(failure)");
 }
 
-/* std::_Exit (the runtime's fatal paths) reaches _exit directly (link: --wrap=_exit). */
-void __real__exit(int status) __attribute__((noreturn));
+/* std::_Exit (the runtime's fatal paths) reaches _exit directly. */
 
 void __wrap__exit(int status) {
-    if (status == 0)
-        __real__exit(0);
-    quit_now(status == 1 ? "_exit(1)" : "_exit(failure)");
+    quit_now(status == 0 ? "_exit(0)" : status == 1 ? "_exit(1)" : "_exit(failure)");
 }
 
 /* libnx's pthread_detach returns ENOSYS, which std::thread::detach turns into an exception. The
