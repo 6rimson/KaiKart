@@ -320,8 +320,13 @@ else()
         set_property(TARGET TracyClient PROPERTY SOURCES "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/tracy_stub.cpp")
     endif()
     if(MKW_KAIHEN AND TARGET sqlite3)
-        # newlib has no mmap or dlopen: no WAL (shared memory), memory-mapped reads or extensions.
-        target_compile_definitions(sqlite3 PRIVATE SQLITE_OMIT_WAL=1 SQLITE_MAX_MMAP_SIZE=0 SQLITE_OMIT_LOAD_EXTENSION=1)
+        # newlib has no mmap or dlopen. aurora's caches use WAL; in exclusive locking mode SQLite
+        # keeps WAL's index in ordinary memory instead of shared memory, and only the game opens
+        # these files. No memory-mapped reads, no extensions. The VFS without file locks (libnx's
+        # SD card has none) is made the default at startup (kaihen/platform/kaihen_platform.c).
+        target_compile_definitions(sqlite3 PRIVATE SQLITE_DEFAULT_LOCKING_MODE=1 SQLITE_MAX_MMAP_SIZE=0
+            SQLITE_OMIT_LOAD_EXTENSION=1)
+        target_include_directories(sqlite3 BEFORE PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/include")
     endif()
 
     # Keep upstream Aurora split: several sources intentionally use file-local
@@ -418,7 +423,9 @@ if(MKW_KAIHEN)
     # What HBLauncher's runtime gave the game, on libnx (startup, screen, Vulkan, CPU clock).
     set(MKW_KAIHEN_PLATFORM_SOURCE "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/kaihen_platform.c")
     list(APPEND SOURCES "${MKW_KAIHEN_PLATFORM_SOURCE}")
-    set_source_files_properties("${MKW_KAIHEN_PLATFORM_SOURCE}" PROPERTIES INCLUDE_DIRECTORIES "${HBX_SDK_INCLUDE}"
+    FetchContent_GetProperties(sqlite3 SOURCE_DIR MKW_KAIHEN_SQLITE_DIR)  # aurora's SQLite, for sqlite3.h
+    set_source_files_properties("${MKW_KAIHEN_PLATFORM_SOURCE}" PROPERTIES
+        INCLUDE_DIRECTORIES "${HBX_SDK_INCLUDE};${MKW_KAIHEN_SQLITE_DIR}"
         SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
     # No Steam on the console: its input-layout helper (it spawns a process) is a no-op here.
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/steam_input_layout.cpp")

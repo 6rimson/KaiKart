@@ -56,6 +56,79 @@ static void load_settings(void) {
 
 void hbxl_cpu_clock_restore(void);
 
+/* SQLite (aurora's shader and pipeline caches): its log on ours; the VFS without file locks as the
+ * default, since libnx's SD card files take no fcntl locks; and an fstat that works on them. */
+#include <fcntl.h>
+#include <sqlite3.h>
+#include <sys/stat.h>
+
+static void sqlite_log(void *arg, int code, const char *message) {
+    (void)arg;
+    fprintf(stderr, "[sqlite] %d: %s\n", code, message);
+}
+
+/* Where libnx's stat calls fail on these files, SQLite gets a regular file of the right length (it
+ * also wants an inode, which it only compares between connections to one file). */
+static int length_stat(int fd, struct stat *st) {
+    const off_t here = lseek(fd, 0, SEEK_CUR), end = lseek(fd, 0, SEEK_END);
+    if (here < 0 || end < 0)
+        return -1;
+    lseek(fd, here, SEEK_SET);
+    memset(st, 0, sizeof *st);
+    st->st_mode = S_IFREG | 0644;
+    st->st_size = end;
+    st->st_ino = (ino_t)fd + 1;
+    st->st_nlink = 1;
+    st->st_blksize = 4096;
+    return 0;
+}
+
+static int sqlite_fstat(int fd, struct stat *st) {
+    if (fstat(fd, st) == 0)
+        return 0;
+    static int reported;
+    if (reported++ < 8)
+        fprintf(stderr, "[kaihen] fstat %d failed (%d): SQLite uses the file's length instead\n", fd, errno);
+    return length_stat(fd, st);
+}
+
+/* libnx's stat opens the file to read its size, and the console's file system won't open a file
+ * that is already open for writing (EIO): SQLite stats its own open database before creating the
+ * journal. The entry's type, asked without opening it, is all SQLite needs there. */
+static int sqlite_stat(const char *path, struct stat *st) {
+    if (stat(path, st) == 0)
+        return 0;
+    const int error = errno;
+    FsFileSystem *fs = fsdevGetDeviceFileSystem("sdmc");
+    FsDirEntryType type;
+    char fs_path[FS_MAX_PATH];
+    snprintf(fs_path, sizeof fs_path, "%s", strncmp(path, "sdmc:", 5) == 0 ? path + 5 : path);
+    if (error == ENOENT || !fs || R_FAILED(fsFsGetEntryType(fs, fs_path, &type))) {
+        errno = error;
+        return -1;
+    }
+    memset(st, 0, sizeof *st);
+    st->st_mode = (type == FsDirEntryType_Dir ? S_IFDIR | 0755 : S_IFREG | 0644);
+    st->st_size = type == FsDirEntryType_Dir ? 0 : 1; /* unknown, but a file in use isn't empty */
+    st->st_nlink = 1;
+    st->st_blksize = 4096;
+    return 0;
+}
+
+static void sqlite_setup(void) {
+    sqlite3_config(SQLITE_CONFIG_LOG, sqlite_log, (void *)0);
+    sqlite3_vfs *vfs = sqlite3_vfs_find("unix-none");
+    if (vfs) {
+        sqlite3_vfs_register(vfs, 1);
+        if (vfs->iVersion >= 3 && vfs->xSetSystemCall) {
+            vfs->xSetSystemCall(vfs, "fstat", (sqlite3_syscall_ptr)sqlite_fstat);
+            vfs->xSetSystemCall(vfs, "stat", (sqlite3_syscall_ptr)sqlite_stat);
+            vfs->xSetSystemCall(vfs, "lstat", (sqlite3_syscall_ptr)sqlite_stat);
+        }
+    }
+    fprintf(stderr, "[kaihen] sqlite: %s\n", vfs ? "unix-none VFS" : "no unix-none VFS");
+}
+
 /* Ends the game without tearing it down (its GPU and worker threads still run). An application
  * that just ends counts as crashed ("the software needed to close"): it has to ask the applet
  * manager to end it (ISelfController Exit). libnx does that for a program it started itself, or
@@ -113,6 +186,7 @@ void userAppInit(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     load_settings();
+    sqlite_setup();
     /* As HBLauncher's environment: SDL draws nothing itself (aurora presents through Dawn to the
      * NWindow), so its offscreen video driver. hbxl-env wins. */
     setenv("SDL_VIDEO_DRIVER", "offscreen", 0);
