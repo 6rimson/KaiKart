@@ -1127,6 +1127,10 @@ void InstallSehLogger() {
         SetUnhandledExceptionFilter(UnhandledSehFilter);
     }
 }
+#elif defined(MKW_KAIHEN)
+// kaiHEN: a game gets no fault signals (the kernel ends the app instead), so there is nothing to
+// install. kaiHEN's probe confirmed the app's own exception handler is never entered.
+void InstallPosixMemoryFaultHandler() {}
 #else
 // POSIX counterpart to SehLogger above. Unlike Windows' AddVectoredExceptionHandler, which lets
 // GuestFlat and this module each install their own handler and defensively re-check each other,
@@ -1438,8 +1442,8 @@ int RuntimeMain(int argc, char** argv) {
         static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
             {"auto", BACKEND_AUTO}, {"metal", BACKEND_METAL},
         }};
-// only vulkan for linux
-#elif defined(__linux__)
+// only vulkan for linux (and kaiHEN)
+#elif defined(__linux__) || defined(MKW_KAIHEN)
             static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
             {"auto", BACKEND_AUTO}, {"vulkan", BACKEND_VULKAN},
         }};

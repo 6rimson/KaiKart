@@ -1,0 +1,134 @@
+--- sdl3-orig/CMakeLists.txt
++++ sdl3/CMakeLists.txt
+@@ -2923,6 +2923,30 @@
+     CheckOSS()
+   endif()
+ 
++elseif(NINTENDO_SWITCH)
++  # kaiHEN (Switch 2 homebrew: libounce and newlib): pthreads, Unix time and timers, POSIX file
++  # operations, paths on the microSD. Audio and input are the HBLauncher drivers above
++  # (HBX_SWITCH2), fed by the app.
++  sdl_sources("${SDL3_SOURCE_DIR}/src/filesystem/switch/SDL_sysfilesystem.c")
++  set(HAVE_SDL_FILESYSTEM TRUE)
++
++  set(SDL_FSOPS_POSIX 1)
++  sdl_sources("${SDL3_SOURCE_DIR}/src/filesystem/posix/SDL_sysfsops.c")
++  set(HAVE_SDL_FSOPS TRUE)
++
++  set(SDL_TIME_UNIX 1)
++  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/time/unix/*.c")
++  set(HAVE_SDL_TIME TRUE)
++
++  set(SDL_TIMER_UNIX 1)
++  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/timer/unix/*.c")
++  set(HAVE_SDL_TIMERS TRUE)
++  set(HAVE_CLOCK_GETTIME 1)
++
++  set(SDL_PTHREADS ON)
++  set(SDL_PTHREADS_PRIVATE ON)
++  CheckPTHREAD()
++
+ elseif(VITA)
+   # SDL_spinlock.c Needs to be compiled in ARM mode.
+   cmake_push_check_state()
+--- sdl3-orig/src/filesystem/switch/SDL_sysfilesystem.c
++++ sdl3/src/filesystem/switch/SDL_sysfilesystem.c
+@@ -0,0 +1,60 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++#include "SDL_internal.h"
++
++// Nintendo Switch homebrew (kaiHEN, libounce): paths on the microSD, after the 3DS version.
++// File operations (and the current directory) are the POSIX ones.
++
++#include "../SDL_sysfilesystem.h"
++
++#include <errno.h>
++#include <sys/stat.h>
++
++char *SDL_SYS_GetBasePath(void)
++{
++    return SDL_strdup("sdmc:/switch/");
++}
++
++char *SDL_SYS_GetExeName(void)
++{
++    return NULL;
++}
++
++char *SDL_SYS_GetPrefPath(const char *org, const char *app)
++{
++    char *pref_path = NULL;
++    if (SDL_asprintf(&pref_path, "sdmc:/switch/%s/", app ? app : (org ? org : "SDL")) < 0) {
++        return NULL;
++    }
++    if (mkdir(pref_path, 0777) == -1 && errno != EEXIST) {
++        SDL_SetError("Failed to create '%s' (%s)", pref_path, strerror(errno));
++        SDL_free(pref_path);
++        return NULL;
++    }
++    return pref_path;
++}
++
++char *SDL_SYS_GetUserFolder(SDL_Folder folder)
++{
++    (void)folder;
++    SDL_Unsupported();
++    return NULL;
++}
+--- sdl3-orig/src/dynapi/SDL_dynapi.h
++++ sdl3/src/dynapi/SDL_dynapi.h
+@@ -63,6 +63,8 @@
+ #define SDL_DYNAMIC_API 0 // vitasdk doesn't support dynamic linking
+ #elif defined(SDL_PLATFORM_3DS)
+ #define SDL_DYNAMIC_API 0 // devkitARM doesn't support dynamic linking
++#elif defined(__SWITCH__)
++#define SDL_DYNAMIC_API 0 // devkitA64 (kaiHEN) doesn't support dynamic linking
+ #elif defined(SDL_PLATFORM_NGAGE)
+ #define SDL_DYNAMIC_API 0
+ #elif defined(DYNAPI_NEEDS_DLOPEN) && !defined(HAVE_DLOPEN)
+--- sdl3-orig/src/thread/pthread/SDL_systhread.c
++++ sdl3/src/thread/pthread/SDL_systhread.c
+@@ -187,8 +187,8 @@
+ 
+ bool SDL_SYS_SetThreadPriority(SDL_ThreadPriority priority)
+ {
+-#ifdef SDL_PLATFORM_RISCOS
+-    // FIXME: Setting thread priority does not seem to be supported
++#if defined(SDL_PLATFORM_RISCOS) || defined(__SWITCH__)
++    // FIXME: Setting thread priority does not seem to be supported (newlib: no sched_* or pthread_*schedparam)
+     return true;
+ #else
+     struct sched_param sched;
+--- sdl3-orig/src/time/unix/SDL_systime.c
++++ sdl3/src/time/unix/SDL_systime.c
+@@ -194,7 +194,10 @@
+          * The notable exception is Solaris, where the timezone offset must still be retrieved in the strictly POSIX.1-2008
+          * compliant way.
+          */
+-#if (_POSIX_VERSION >= 202405L) || (!defined(sun) && !defined(__sun))
++#if defined(__SWITCH__)
++        (void)localTime;
++        dt->utc_offset = (int)-_timezone; // newlib: no tm_gmtoff; _timezone is seconds west of UTC
++#elif (_POSIX_VERSION >= 202405L) || (!defined(sun) && !defined(__sun))
+         dt->utc_offset = (int)tm->tm_gmtoff;
+ #else
+         if (localTime) {

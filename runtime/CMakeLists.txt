@@ -10,7 +10,13 @@ if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
 endif()
 project(mkw_recompiled)
 
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+# kaiHEN builds with the Switch 2 devkit's GCC (kaihen/cmake/kaihen.cmake).
+option(MKW_KAIHEN "Build for kaiHEN (native Switch 2 homebrew) with the Switch 2 devkit" OFF)
+if(MKW_KAIHEN)
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+        message(FATAL_ERROR "The kaiHEN build uses the Switch 2 devkit's GCC: kaihen/run.sh")
+    endif()
+elseif(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "WiiCompiled requires a 64-bit Clang toolchain")
 endif()
 
@@ -35,6 +41,9 @@ elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64|arm
     else()
         set(MKW_PLATFORM_MACOS_ARM64 TRUE)
     endif()
+elseif(MKW_KAIHEN)
+    # Built like the HBLauncher (Linux) port; the differences are under MKW_KAIHEN.
+    set(MKW_PLATFORM_LINUX TRUE)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64|aarch64|arm64|ARM64)$")
     set(MKW_PLATFORM_LINUX TRUE)
 else()
@@ -182,6 +191,12 @@ if(NOT MKW_PLATFORM_WINDOWS)
         set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
         FetchContent_MakeAvailable(mkw_mbedtls_upstream)
         target_link_libraries(mkw_mbedtls INTERFACE MbedTLS::mbedtls MbedTLS::mbedx509 MbedTLS::mbedcrypto)
+        if(MKW_KAIHEN)
+            foreach(t mbedtls mbedx509 mbedcrypto)
+                target_compile_definitions(${t} PUBLIC "MBEDTLS_USER_CONFIG_FILE=\"kaihen_mbedtls_config.h\"" PRIVATE unix=1)
+                target_include_directories(${t} PUBLIC "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform")
+            endforeach()
+        endif()
     endif()
 endif()
 
@@ -208,6 +223,12 @@ endif()
 # The translator's explicit float casts are PPC single-precision rounding points.
 # Fast-math may erase them and change guest-visible integer conversions.
 set(MKW_TRANSLATED_PPC_FP_OPTIONS -fno-fast-math -ffp-contract=off)
+# Clang's spelling, or GCC's (the kaiHEN build).
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(MKW_NO_SLP_VECTORIZE -fno-tree-slp-vectorize)
+else()
+    set(MKW_NO_SLP_VECTORIZE -fno-slp-vectorize)
+endif()
 
 set(MKW_PPC_SEMANTIC_RUNTIME_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/src/ppc_helpers.cpp"
@@ -219,7 +240,7 @@ set_source_files_properties(${MKW_PPC_SEMANTIC_RUNTIME_SOURCES} PROPERTIES
     COMPILE_OPTIONS "${MKW_TRANSLATED_PPC_FP_OPTIONS}")
 # Match the optimization policy of the translated callers as well as their FP policy.
 set_property(SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/ppc_quantized.cpp" APPEND PROPERTY
-    COMPILE_OPTIONS -O2 -fno-slp-vectorize)
+    COMPILE_OPTIONS -O2 ${MKW_NO_SLP_VECTORIZE})
 
 # ----------------------------------------------------------------------
 # Third-party: aurora-main (provides SDL3 + GPU backends)
@@ -293,6 +314,15 @@ else()
     # Isolate aurora build products to a subdirectory under the main build dir.
     add_subdirectory(${MKW_AURORA_DIR} ${CMAKE_BINARY_DIR}/aurora-build EXCLUDE_FROM_ALL)
     set(CMAKE_DISABLE_PRECOMPILE_HEADERS OFF)
+    if(MKW_KAIHEN AND TARGET TracyClient)
+        # Tracy is off, but its client always builds its platform layer, which has no Switch
+        # port. aurora only calls tracy::SetThreadName: a stub stands in for the client.
+        set_property(TARGET TracyClient PROPERTY SOURCES "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/tracy_stub.cpp")
+    endif()
+    if(MKW_KAIHEN AND TARGET sqlite3)
+        # newlib has no mmap or dlopen: no WAL (shared memory), memory-mapped reads or extensions.
+        target_compile_definitions(sqlite3 PRIVATE SQLITE_OMIT_WAL=1 SQLITE_MAX_MMAP_SIZE=0 SQLITE_OMIT_LOAD_EXTENSION=1)
+    endif()
 
     # Keep upstream Aurora split: several sources intentionally use file-local
     # names that collide under this repo's aggressive unity build settings.
@@ -383,6 +413,20 @@ set(MKW_RETRO_REWIND_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/retro
 set(MKW_CPU_BASELINE_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/host_cpu_baseline.cpp")
 list(REMOVE_ITEM SOURCES ${MKW_BASE_PRODUCT_SOURCE} ${MKW_RETRO_REWIND_PRODUCT_SOURCE}
      ${MKW_CPU_BASELINE_SOURCE} ${MKW_PLATFORM_SOURCE})
+
+if(MKW_KAIHEN)
+    # What HBLauncher's runtime gave the game, on libnx (startup, screen, Vulkan, CPU clock).
+    set(MKW_KAIHEN_PLATFORM_SOURCE "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/kaihen_platform.c")
+    list(APPEND SOURCES "${MKW_KAIHEN_PLATFORM_SOURCE}")
+    set_source_files_properties("${MKW_KAIHEN_PLATFORM_SOURCE}" PROPERTIES INCLUDE_DIRECTORIES "${HBX_SDK_INCLUDE}"
+        SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
+    # No Steam on the console: its input-layout helper (it spawns a process) is a no-op here.
+    list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/steam_input_layout.cpp")
+    list(APPEND SOURCES "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/steam_input_layout_stub.cpp")
+    # newlib lacks <sys/mman.h>, <dlfcn.h>, <sys/random.h> and <sys/un.h>: small stand-ins for the
+    # runtime's targets.
+    include_directories(BEFORE SYSTEM "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/include")
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/PlatformTests.cmake")
 

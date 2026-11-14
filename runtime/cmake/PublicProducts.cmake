@@ -37,7 +37,7 @@ endif()
 
 function(mkw_apply_translated_compile_options target)
     target_compile_options(${target} PRIVATE
-        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -w -pipe)
+        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} ${MKW_NO_SLP_VECTORIZE} -w -pipe)
     # Retro Rewind's translated code compiles about five times slower instrumented (each of its 48
     # shards took over 20 minutes), so it is left out of PGO and built as usual.
     if(NOT target STREQUAL "mkw_retro_rewind_functions")

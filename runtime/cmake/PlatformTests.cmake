@@ -13,7 +13,7 @@ if(MKW_BUILD_PSQ_TESTS)
         "${MKW_TEST_RUNTIME_DIR}/include")
     target_compile_features(mkw_psq_helpers_tests PRIVATE cxx_std_17)
     target_compile_options(mkw_psq_helpers_tests PRIVATE
-        -O2 -fno-fast-math -ffp-contract=off -fno-slp-vectorize)
+        -O2 -fno-fast-math -ffp-contract=off ${MKW_NO_SLP_VECTORIZE})
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
         target_compile_options(mkw_psq_helpers_tests PRIVATE
             -march=x86-64-${MKW_X86_CPU_PROFILE})

@@ -1,0 +1,75 @@
+--- dawn-orig/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
++++ dawn/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
+@@ -30,6 +30,10 @@
+ #include <sys/syscall.h>
+ #endif
+ 
++#ifdef __SWITCH__
++#include <switch.h>
++#endif
++
+ #if defined(__APPLE__) || defined(__FreeBSD__)
+ #include <sys/sysctl.h>
+ #endif
+@@ -472,6 +476,13 @@
+   return static_cast<pid_t>(zx_thread_self());
+ }
+ 
++#elif defined(__SWITCH__)
++
++// Switch homebrew (newlib): pthread_t is a pointer; the kernel thread handle is unique per thread.
++pid_t GetTID() {
++  return static_cast<pid_t>(threadGetCurHandle());
++}
++
+ #else
+ 
+ // Fallback implementation of `GetTID` using `pthread_self`.
+--- dawn-orig/third_party/abseil-cpp/absl/debugging/internal/elf_mem_image.h
++++ dawn/third_party/abseil-cpp/absl/debugging/internal/elf_mem_image.h
+@@ -35,7 +35,8 @@
+ #if defined(__ELF__) && !defined(__OpenBSD__) && !defined(__QNX__) &&    \
+     !defined(__asmjs__) && !defined(__wasm__) && !defined(__HAIKU__) &&  \
+     !defined(__sun) && !defined(__VXWORKS__) && !defined(__hexagon__) && \
+-    !defined(__XTENSA__)
++    !defined(__XTENSA__) && !defined(__SWITCH__)
++// __SWITCH__ (newlib): no <link.h>, no dynamic linker.
+ #define ABSL_HAVE_ELF_MEM_IMAGE 1
+ #endif
+ 
+--- dawn-orig/third_party/abseil-cpp/absl/time/internal/cctz/src/time_zone_libc.cc
++++ dawn/third_party/abseil-cpp/absl/time/internal/cctz/src/time_zone_libc.cc
+@@ -61,7 +61,8 @@
+   return tzname[is_dst];
+ }
+ #elif defined(__native_client__) || defined(__myriad2__) || \
+-    defined(__EMSCRIPTEN__)
++    defined(__EMSCRIPTEN__) || defined(__SWITCH__)
++// __SWITCH__ (newlib): struct tm has no tm_gmtoff; _timezone and tzname exist.
+ // Uses the globals: '_timezone' and 'tzname'.
+ auto tm_gmtoff(const std::tm& tm) -> decltype(_timezone + 0) {
+   const bool is_dst = tm.tm_isdst > 0;
+--- dawn-orig/third_party/abseil-cpp/absl/base/internal/thread_identity.cc
++++ dawn/third_party/abseil-cpp/absl/base/internal/thread_identity.cc
+@@ -84,7 +84,7 @@
+   absl::call_once(init_thread_identity_key_once, AllocateThreadIdentityKey,
+                   reclaimer);
+ 
+-#if defined(__wasi__) || defined(__EMSCRIPTEN__) || defined(__MINGW32__) || \
++#if defined(__wasi__) || defined(__EMSCRIPTEN__) || defined(__MINGW32__) || defined(__SWITCH__) || \
+     defined(__hexagon__)
+   // Emscripten, WASI and MinGW pthread implementations does not support
+   // signals. See
+--- dawn-orig/third_party/CMakeLists.txt
++++ dawn/third_party/CMakeLists.txt
+@@ -214,7 +214,9 @@
+ if (NOT TARGET renderdoc-api)
+     add_library(RenderDocApi INTERFACE)
+     target_include_directories(RenderDocApi INTERFACE "renderdoc")
+-    target_compile_definitions(RenderDocApi INTERFACE "DAWN_ENABLE_RENDERDOC")
++    if (NOT NINTENDO_SWITCH)  # kaiHEN: RenderDoc has no Switch support
++        target_compile_definitions(RenderDocApi INTERFACE "DAWN_ENABLE_RENDERDOC")
++    endif()
+ endif()
+ 
+ if (DAWN_ENABLE_DESKTOP_GL OR DAWN_ENABLE_OPENGLES)

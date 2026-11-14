@@ -150,7 +150,7 @@ inline bool IsSupportedGraphicsApi(std::string_view value) {
 #if defined(__APPLE__)
     static constexpr std::array<std::string_view, 2> values{"auto", "metal"};
 // only vulkan for linux
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(MKW_KAIHEN)
     static constexpr std::array<std::string_view, 2> values{"auto", "vulkan"};
 #elif defined(_WIN32)
     static constexpr std::array<std::string_view, 3> values{"auto", "d3d12", "vulkan"};
@@ -171,6 +171,10 @@ inline bool IsSupportedFrameInterpolationFps(uint32_t value) {
     return value == 0 || value == 120 || value == 180;
 }
 
+#if defined(MKW_KAIHEN)
+extern "C" const char* kaihen_root_directory(void);
+#endif
+
 inline std::optional<std::filesystem::path> ExecutableDirectory() {
 #ifdef _WIN32
     std::wstring buffer(MAX_PATH, L'\0');
@@ -187,6 +191,9 @@ inline std::optional<std::filesystem::path> ExecutableDirectory() {
     }
 #elif defined(__APPLE__)
     return RuntimePlatform::ExecutableDirectory();
+#elif defined(MKW_KAIHEN)
+    // kaiHEN: the game folder on the microSD (kaihen/platform/kaihen_platform.c).
+    return std::filesystem::path(kaihen_root_directory());
 #else
     // /proc/self/exe is a Linux-specific magic symlink to the running executable; readlink()
     // does not NUL-terminate and silently truncates if the buffer is too small, so this grows
@@ -507,6 +514,15 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.nandRoot = FindConfigValue<std::string>(document, "paths", "nand_root");
     config.dvdRoot = FindConfigValue<std::string>(document, "paths", "dvd_root");
     config.retroRewindRoot = FindConfigValue<std::string>(document, "paths", "retro_rewind_root");
+#if defined(MKW_KAIHEN)
+    // The HBLauncher layout's Config.toml names paths from the game folder ("/disc/DATA"), which
+    // was "/" there. On kaiHEN "/" is the card's root, so such paths go under the game folder.
+    for (auto* path : {&config.nandRoot, &config.dvdRoot, &config.retroRewindRoot}) {
+        if (*path && path->value().starts_with('/')) {
+            *path = std::string(kaihen_root_directory()) + path->value();
+        }
+    }
+#endif
     if (auto roots = FindConfigValue<std::vector<std::string>>(document, "paths", "overlay_roots")) {
         for (auto& root : *roots) {
             root = Trim(root);

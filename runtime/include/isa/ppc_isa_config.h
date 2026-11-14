@@ -35,4 +35,15 @@ inline constexpr bool MkwStateFreeAbiEnabled(uint32_t) noexcept
 #define MKW_PPC_COLD __attribute__((cold))
 
 
+#if defined(__clang__)
 using MkwStateFreeResult2 = uint64_t __attribute__((ext_vector_type(2)));
+#else
+// GCC (the kaiHEN build) can't return a vector type from a braced list ("return { a, b };"), which
+// is how translated code builds these. Two lanes in a struct: the same indexing and braces, and
+// the pair comes back in x0/x1.
+struct MkwStateFreeResult2 {
+    uint64_t lane[2];
+    constexpr uint64_t operator[](int index) const { return lane[index]; }
+    constexpr uint64_t& operator[](int index) { return lane[index]; }
+};
+#endif

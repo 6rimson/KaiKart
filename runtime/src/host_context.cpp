@@ -8,7 +8,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#elif defined(__aarch64__) && (defined(__APPLE__) || defined(__linux__))
+#elif defined(__aarch64__) && (defined(__APPLE__) || defined(__linux__) || defined(MKW_KAIHEN))
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -72,7 +72,7 @@ void Switch(Handle target)
     SwitchToFiber(target);
 }
 
-#elif defined(__aarch64__) && (defined(__APPLE__) || defined(__linux__))
+#elif defined(__aarch64__) && (defined(__APPLE__) || defined(__linux__) || defined(MKW_KAIHEN))
 
 namespace {
 struct Context {

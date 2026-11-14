@@ -1,0 +1,31 @@
+--- a/include/dolphin/gx/GXGeometry.h
++++ b/include/dolphin/gx/GXGeometry.h
+@@ -35,9 +35,11 @@
+ #ifdef TARGET_PC
+ void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride, bool le);
+ #ifdef __cplusplus
++extern "C++" {  // GCC: a C-linkage function can't be overloaded, even by a static inline one
+ static inline void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride) {
+   GXSetArray(attr, data, size, stride, false);
+ }
++}
+ #endif
+ #define GXSETARRAY(attr, data, size, stride, le) GXSetArray((attr), (data), (size), (stride), (le))
+ #else
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -569,7 +569,14 @@
+           surfaceWaitNanos = gfx::presentation::now_nanos() - acquireStart;
+           surfaceStatus = surfaceTexture.status;
+ 
++#if defined(MKW_KAIHEN)
++          // kaiHEN: the vi layer scales the swapchain to the screen, so a suboptimal (differently
++          // sized) image presents fine; reconfiguring can never make it optimal.
++          if (surfaceStatus == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal ||
++              surfaceStatus == wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal) {
++#else
+           if (surfaceStatus == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) {
++#endif
+             currentTexture = std::move(surfaceTexture.texture);
+             currentView = currentTexture.CreateView();
+           }
