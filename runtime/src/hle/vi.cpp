@@ -551,6 +551,21 @@ bool VI_HLE_InRaceSection() {
     }
     return false;
 }
+
+#if defined(MKW_KAIHEN)
+// For the kaiHEN shim's profiler thread (kaihen/platform/kaihen_platform.c), which asks from its own
+// thread from startup on: before the game's memory exists, the read above throws (and logs).
+extern "C" int kaihen_in_race(void) noexcept {
+    if (!Memory::Contains(MKW_GADDR(809C1E38), 4)) {
+        return 0;
+    }
+    try {
+        return VI_HLE_InRaceSection() ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+#endif
 #endif
 
 // Single owner of the Aurora frame presentation sequence: seals the active frame, optionally paces the

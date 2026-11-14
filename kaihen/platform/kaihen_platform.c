@@ -27,6 +27,19 @@
 
 #define KAIHEN_ROOT "sdmc:/wiicompiled"
 
+/* Clang reads the thread pointer from TPIDR_EL0; libnx keeps it in the thread's TLS slot (GCC's
+ * -mtp=soft asks libnx). Each thread gets libnx's value in TPIDR_EL0, which the kernel keeps per
+ * thread: the main thread at startup, every pthread as it starts (link: --wrap=pthread_create), and
+ * the shim's own libnx threads (watchdog, log writer, profiler) at their start: Clang code they
+ * call into, such as the runtime's, reads thread-locals through it. */
+void *__aarch64_read_tp(void);
+
+static inline void copy_thread_pointer(void) {
+    void *tp = __aarch64_read_tp();
+    __asm__ volatile("msr tpidr_el0, %0" ::"r"(tp));
+}
+
+
 /* SDL's HBLauncher drivers read this: the joystick driver needs it set, the audio driver calls
  * its audio table (filled below). Nothing else in it is used. */
 static struct hbx_ctx g_ctx;
@@ -110,6 +123,7 @@ static void log_drain(void) {
 
 static void log_thread(void *arg) {
     (void)arg;
+    copy_thread_pointer();
     while (!g_log_stop) {
         svcSleepThread(200000000ull);
         log_drain();
@@ -176,6 +190,86 @@ static void load_settings(void) {
 
 void hbxl_cpu_clock_restore(void);
 void __libnx_exit(int rc) __attribute__((noreturn));
+
+/* --- sampling profiler (KAIHEN_PROFILE=1 in hbxl-env) ------------------------------------------ */
+/* During races, about a thousand times a second, a thread on a core of its own pauses the game
+ * thread for a moment and records the time, its pc and lr, and up to 8 callers from the frame-pointer
+ * chain. They go to UserData/Logs/profile.bin at exit: a header {userAppInit's address (subtract the
+ * ELF's to get the load address), sample count, words per sample}, then the samples. */
+int kaihen_in_race(void); /* runtime/src/hle/vi.cpp */
+void userAppInit(void);
+
+static u64 *g_samples;
+static size_t g_sample_count; /* words */
+enum { PROFILE_FRAMES = 8, PROFILE_WORDS = 3 + PROFILE_FRAMES, PROFILE_SAMPLES = 200000 };
+static Thread g_profiler;
+static volatile int g_profiler_stop;
+
+static void profiler(void *arg) {
+    (void)arg;
+    copy_thread_pointer();
+    const Handle game = envGetMainThreadHandle();
+    while (!g_profiler_stop) {
+        svcSleepThread(1000000ull);
+        if (!kaihen_in_race() || g_sample_count + PROFILE_WORDS > (size_t)PROFILE_SAMPLES * PROFILE_WORDS)
+            continue;
+        if (R_FAILED(svcSetThreadActivity(game, ThreadActivity_Paused)))
+            continue;
+        ThreadContext context;
+        const Result rc = svcGetThreadContext3(&context, game);
+        u64 *sample = g_samples + g_sample_count;
+        if (R_SUCCEEDED(rc)) {
+            sample[0] = armGetSystemTick();
+            sample[1] = context.pc.x;
+            sample[2] = context.lr;
+            /* Frame records {fp, lr}, on the thread's stack (a guest coroutine's, too) above sp. */
+            u64 fp = context.fp, sp = context.sp;
+            for (int i = 0; i < PROFILE_FRAMES; i++) {
+                u64 lr = 0;
+                if (fp > sp && fp < sp + 0x1000000 && !(fp & 7)) {
+                    lr = ((const u64 *)fp)[1];
+                    const u64 next = ((const u64 *)fp)[0];
+                    sp = fp;
+                    fp = next;
+                } else {
+                    fp = 0;
+                }
+                sample[3 + i] = lr;
+            }
+        }
+        svcSetThreadActivity(game, ThreadActivity_Runnable);
+        if (R_SUCCEEDED(rc))
+            g_sample_count += PROFILE_WORDS;
+    }
+}
+
+static void profiler_start(int core) {
+    const char *on = getenv("KAIHEN_PROFILE");
+    if (!on || strcmp(on, "1") != 0)
+        return;
+    g_samples = malloc((size_t)PROFILE_SAMPLES * PROFILE_WORDS * sizeof *g_samples);
+    if (g_samples && R_SUCCEEDED(threadCreate(&g_profiler, profiler, NULL, NULL, 0x4000, 0x2C, core)))
+        threadStart(&g_profiler);
+    fprintf(stderr, "[kaihen] profiling races on core %d (userAppInit at %p)\n", core, (void *)userAppInit);
+}
+
+static void profiler_finish(void) {
+    /* Not from the profiler thread itself: it would wait for its own end. */
+    if (!g_profiler.handle || threadGetCurHandle() == g_profiler.handle)
+        return;
+    g_profiler_stop = 1;
+    threadWaitForExit(&g_profiler);
+    threadClose(&g_profiler);
+    g_profiler.handle = 0;
+    const int fd = open(KAIHEN_ROOT "/UserData/Logs/profile.bin", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0)
+        return;
+    const u64 header[3] = {(u64)(uintptr_t)userAppInit, g_sample_count / PROFILE_WORDS, PROFILE_WORDS};
+    write(fd, header, sizeof header);
+    write(fd, g_samples, g_sample_count * sizeof *g_samples);
+    close(fd);
+    fprintf(stderr, "[kaihen] %lu profile samples written\n", (unsigned long)(g_sample_count / PROFILE_WORDS));
+}
 void __appExit(void);
 
 /* SQLite (aurora's shader and pipeline caches): its log on ours; the VFS without file locks as the
@@ -261,6 +355,7 @@ extern u32 __nx_applet_exit_mode;
 static void __attribute__((noreturn)) quit_now(const char *why) {
     fprintf(stderr, "[kaihen] %s: quitting\n", why);
     hbxl_cpu_clock_restore();
+    profiler_finish();
     fflush(NULL);
     log_finish();
     __nx_applet_exit_mode = 1;
@@ -298,6 +393,7 @@ void kaihen_return_to_hbmenu(void) {
     threadClose(&g_watchdog);
     hbxl_cpu_clock_restore();
     fprintf(stderr, "[kaihen] returning to hbmenu\n");
+    profiler_finish();
     fflush(NULL);
     log_finish();
     __libnx_exit(0); /* services closed (userAppExit too, and the GPU driver's), then back to hbloader */
@@ -308,6 +404,7 @@ void kaihen_return_to_hbmenu(void) {
  * frame comes within 3 seconds, it quits to the home menu instead. It ends when a return starts. */
 static void watchdog(void *arg) {
     (void)arg;
+    copy_thread_pointer();
     PadState pad;
     padInitializeDefault(&pad);
     int held = 0;
@@ -329,16 +426,6 @@ static void watchdog(void *arg) {
             return;
     }
     quit_now("no frame to return from");
-}
-
-/* Clang reads the thread pointer from TPIDR_EL0; libnx keeps it in the thread's TLS slot (GCC's
- * -mtp=soft asks libnx). Each thread gets libnx's value in TPIDR_EL0, which the kernel keeps per
- * thread: the main thread here, every pthread as it starts (link: --wrap=pthread_create). */
-void *__aarch64_read_tp(void);
-
-static inline void copy_thread_pointer(void) {
-    void *tp = __aarch64_read_tp();
-    __asm__ volatile("msr tpidr_el0, %0" ::"r"(tp));
 }
 
 /* CPU cores, as HBLauncher's runtime placed them (hbxl_pin_next_thread, its sdk/linux/thread.c):
@@ -443,6 +530,7 @@ void userAppInit(void) {
         threadStart(&g_watchdog);
     fprintf(stderr, "[kaihen] started, nxlink %s; game thread on core %d of mask %lx; hold + and - to quit\n",
             g_nxlink >= 0 ? "on" : "off", g_game_core, (unsigned long)g_cores);
+    profiler_start(g_game_core == 1 ? 0 : 1); /* a core no worker is pinned to */
 }
 
 void userAppExit(void) {
