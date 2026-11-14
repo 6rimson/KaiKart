@@ -55,6 +55,8 @@ static void load_settings(void) {
 }
 
 void hbxl_cpu_clock_restore(void);
+void __libnx_exit(int rc) __attribute__((noreturn));
+void __appExit(void);
 
 /* SQLite (aurora's shader and pipeline caches): its log on ours; the VFS without file locks as the
  * default, since libnx's SD card files take no fcntl locks; and an fstat that works on them. */
@@ -151,16 +153,43 @@ static void __attribute__((noreturn)) quit_now(const char *why) {
     __builtin_unreachable();
 }
 
-/* Until the game handles the console's applet messages and input (milestone 3): a thread that
- * services the applet, and quits the game when + and - are held together for a second. */
+/* --- returning to hbmenu --------------------------------------------------------------------- */
+/* As any homebrew does: return through libnx's exit, and kaiHEN's hbloader (ounce-hbloader) loads
+ * hbmenu again. It parks the threads a program leaves running (pauses them for good and gives their
+ * stacks back to the heap), so the game's threads are left to it: pausing them here first makes its
+ * own pause fail, and then it ends the process. The runtime shuts down graphics, audio and its GX
+ * worker first (settings_overlay.cpp ConsoleReturnToLauncher). */
+
+static volatile int g_return_requested;
+int kaihen_return_requested(void) { return g_return_requested; }
+
+/* The game's other threads still run until hbloader parks them and may still log: userAppExit
+ * leaves the log open on this path. */
+static volatile int g_returning;
 static Thread g_watchdog;
 
+void kaihen_return_to_hbmenu(void) {
+    if (threadGetCurHandle() != envGetMainThreadHandle())
+        quit_now("return to hbmenu off the main thread");
+    /* The watchdog uses the applet and input services, which libnx's exit closes: it ends first. */
+    g_returning = 1;
+    threadWaitForExit(&g_watchdog);
+    threadClose(&g_watchdog);
+    hbxl_cpu_clock_restore();
+    fprintf(stderr, "[kaihen] returning to hbmenu\n");
+    fflush(NULL);
+    __libnx_exit(0); /* services closed (userAppExit too, and the GPU driver's), then back to hbloader */
+}
+
+/* Until the game handles the console's applet messages (milestone 3): a thread that services the
+ * applet. Holding + and - for a second asks the game to return to hbmenu between frames; if no
+ * frame comes within 3 seconds, it quits to the home menu instead. It ends when a return starts. */
 static void watchdog(void *arg) {
     (void)arg;
     PadState pad;
     padInitializeDefault(&pad);
     int held = 0;
-    while (appletMainLoop()) {
+    while (!g_returning && appletMainLoop()) {
         padUpdate(&pad);
         const u64 buttons = padGetButtons(&pad);
         held = (buttons & HidNpadButton_Plus) && (buttons & HidNpadButton_Minus) ? held + 1 : 0;
@@ -168,7 +197,16 @@ static void watchdog(void *arg) {
             break;
         svcSleepThread(50000000ull);
     }
-    quit_now("+ and - held");
+    if (g_returning)
+        return;
+    fprintf(stderr, "[kaihen] + and - held: returning to hbmenu\n");
+    g_return_requested = 1;
+    for (int waited = 0; waited < 60; waited++) {
+        svcSleepThread(50000000ull);
+        if (g_returning)
+            return;
+    }
+    quit_now("no frame to return from");
 }
 
 void userAppInit(void) {
@@ -199,12 +237,74 @@ void userAppInit(void) {
 }
 
 void userAppExit(void) {
-    fprintf(stderr, "[kaihen] exit\n");
-    if (g_log)
-        fclose(g_log);
-    if (g_nxlink >= 0)
-        close(g_nxlink);
-    socketExit();
+    if (!g_returning) {
+        fprintf(stderr, "[kaihen] exit\n");
+        if (g_log)
+            fclose(g_log);
+        if (g_nxlink >= 0)
+            close(g_nxlink);
+        socketExit();
+    }
+    /* Returning to hbmenu: the sockets stay open until the end of __appExit, so the log over
+     * nxlink shows every step. */
+}
+
+/* libounce's __appExit (runtime/init.c, as its init.o does it) and __libnx_exit, with a line in the
+ * log before each step: where a return to hbmenu fails shows in the log. */
+void __nx_gpu_exit(void) __attribute__((weak));
+void __nx_win_exit(void) __attribute__((weak));
+void __nx_exit(Result rc, LoaderReturnFn retaddr) __attribute__((noreturn));
+
+static void step(const char *name) {
+    if (g_returning && g_nxlink >= 0) {
+        char line[96];
+        const int n = snprintf(line, sizeof line, "[kaihen] exit: %s\n", name);
+        write(STDERR_FILENO, line, (size_t)n);
+    }
+}
+
+void __appExit(void) {
+    static int drivers_closed;
+    step("userAppExit");
+    userAppExit();
+    if (!drivers_closed) {
+        drivers_closed = 1;
+        step("GPU driver");
+        if (__nx_gpu_exit)
+            __nx_gpu_exit();
+        step("window");
+        if (__nx_win_exit)
+            __nx_win_exit();
+    }
+    if (g_returning) {
+        /* Returning to hbmenu: the game's files (shader caches, logs, saves) are closed, and the card
+         * stays mounted: unmounting it with the game's threads still around crashed. hbmenu opens its
+         * own file system session. */
+        step("closing files");
+        for (int fd = 3; fd < 1024; fd++)
+            if (fd != g_nxlink)
+                close(fd);
+        step("file system left open");
+    } else {
+        fsdevUnmountAll();
+        fsExit();
+    }
+    step("time");
+    timeExit();
+    step("input");
+    hidExit();
+    step("applet");
+    appletExit();
+    step("sockets");
+    if (g_returning)
+        socketExit();
+    smExit();
+}
+
+void __libnx_exit(int rc) {
+    (void)rc;
+    __appExit();
+    __nx_exit(0, envGetExitFuncPtr());
 }
 
 /* The folder the runtime treats as the executable's (runtime_config.h ExecutableDirectory). Without

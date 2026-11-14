@@ -1840,13 +1840,12 @@ bool g_consoleReturnRequested = false;
 // Runs between frames. The launcher lives in this process, so graphics has to shut down for real:
 // what it keeps allocated would still be allocated for the next launch.
 #if defined(MKW_KAIHEN)
-extern "C" [[noreturn]] void kaihen_quit(const char* why);
+// kaiHEN: hbloader loads hbmenu again in this process once the game hands back control, so the
+// same shutdown applies; the return itself is kaihen/platform/kaihen_platform.c's.
+extern "C" [[noreturn]] void kaihen_return_to_hbmenu(void);
+extern "C" int kaihen_return_requested(void);
 #endif
 [[noreturn]] void ConsoleReturnToLauncher() noexcept {
-#if defined(MKW_KAIHEN)
-    // kaiHEN: the app ends through the applet manager (kaihen/platform/kaihen_platform.c).
-    kaihen_quit("quit from the menu");
-#endif
     RT_LOGF("perf", "returning to the launcher\n");
     if (hbxl_cpu_clock_restore != nullptr) {
         hbxl_cpu_clock_restore();  // the CPU back to its launch rate if CPU boost raised it
@@ -1871,6 +1870,9 @@ extern "C" [[noreturn]] void kaihen_quit(const char* why);
     RT_LOGF("perf", "graphics shut down\n");
     finished.store(true, std::memory_order_release);
     timeout.join();
+#if defined(MKW_KAIHEN)
+    kaihen_return_to_hbmenu();
+#endif
     std::_Exit(EXIT_SUCCESS);
 }
 std::array<bool, SDL_GAMEPAD_BUTTON_COUNT> g_consoleButtons{};
@@ -2049,7 +2051,7 @@ void DrawConsoleMenu() {
         row(rows - 1, g_consoleLinkLost   ? "Launcher link lost: quit with HOME"
                       : g_consoleExitArmed ? "Press A again to quit"
 #if defined(MKW_KAIHEN)
-                                           : "Quit");
+                                           : "Return to hbmenu");
 #else
                                            : "Return to launcher");
 #endif
@@ -2102,6 +2104,9 @@ void AdvancePresentedFrame() noexcept {
     // MKW_AUTOEXIT_FRAMES=N takes the Return to launcher path after N frames, for test runs.
     static const char* const s_autoExit = std::getenv("MKW_AUTOEXIT_FRAMES");
     if (g_consoleReturnRequested ||
+#if defined(MKW_KAIHEN)
+        kaihen_return_requested() ||  // + and - held (kaihen/platform/kaihen_platform.c)
+#endif
         (s_autoExit != nullptr && g_presentedFrame >= std::strtoull(s_autoExit, nullptr, 10))) {
         ConsoleReturnToLauncher();
     }
