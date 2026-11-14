@@ -34,5 +34,5 @@ TTY=(); [[ -t 0 ]] && TTY=(-it)
 mkdir -p "$HERE/dist"
 exec docker run --rm ${TTY[@]+"${TTY[@]}"} \
   -v "$REPO:/host:ro" -v "${HBX_VOLUME:-wiicompiled-hbx}:/opt/work:ro" \
-  -v "${KAIHEN_VOLUME:-wiicompiled-kaihen}:/opt/kaihen" -v "$HERE/dist:/dist" -e KAIHEN_JOBS -e KAIHEN_PRODUCT -e KAIHEN_COMPILER -e KAIHEN_PGO \
+  -v "${KAIHEN_VOLUME:-wiicompiled-kaihen}:/opt/kaihen" -v "$HERE/dist:/dist" -e KAIHEN_JOBS -e KAIHEN_PRODUCT -e KAIHEN_COMPILER -e KAIHEN_PGO -e KAIHEN_VERSION \
   "$IMAGE" bash /host/kaihen/build.sh "$@"

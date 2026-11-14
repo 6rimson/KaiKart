@@ -32,7 +32,126 @@
 static struct hbx_ctx g_ctx;
 const struct hbx_ctx *hbxl_ctx = &g_ctx;
 
-static FILE *g_log;
+/* --- the card log ------------------------------------------------------------------------------ */
+/* Without nxlink, stdout and stderr go to UserData/Logs/kaihen.log. Writing each line to the card
+ * from whichever thread logged it stalled the game every few seconds, so they go to a "kaihenlog"
+ * device that copies into a memory ring, and a low-priority thread writes the ring to the card. */
+#include <fcntl.h>
+#include <sys/iosupport.h>
+
+static char g_ring[1 << 20];
+static size_t g_ring_head, g_ring_tail; /* write and read positions, counted up forever */
+static u64 g_ring_dropped;
+static Mutex g_ring_lock;
+static int g_log_fd = -1;
+static Thread g_log_thread;
+static volatile int g_log_stop;
+
+static ssize_t ring_write(struct _reent *r, void *fd, const char *data, size_t length) {
+    (void)r, (void)fd;
+    mutexLock(&g_ring_lock);
+    const size_t room = sizeof g_ring - (g_ring_head - g_ring_tail);
+    const size_t n = length < room ? length : room;
+    for (size_t done = 0; done < n;) {
+        const size_t at = (g_ring_head + done) % sizeof g_ring;
+        size_t part = sizeof g_ring - at;
+        if (part > n - done)
+            part = n - done;
+        memcpy(g_ring + at, data + done, part);
+        done += part;
+    }
+    g_ring_head += n;
+    g_ring_dropped += length - n;
+    mutexUnlock(&g_ring_lock);
+    return (ssize_t)length;
+}
+
+static int ring_open(struct _reent *r, void *file, const char *path, int flags, int mode) {
+    (void)r, (void)file, (void)path, (void)flags, (void)mode;
+    return 0;
+}
+
+static int ring_close(struct _reent *r, void *fd) {
+    (void)r, (void)fd;
+    return 0;
+}
+
+static const devoptab_t g_ring_device = {
+    .name = "kaihenlog",
+    .structSize = sizeof(int),
+    .open_r = ring_open,
+    .close_r = ring_close,
+    .write_r = ring_write,
+};
+
+/* Writes what the ring holds to the card. Only the log thread, or the exit once it has stopped. */
+static void log_drain(void) {
+    static char chunk[64 << 10];
+    for (;;) {
+        mutexLock(&g_ring_lock);
+        size_t n = g_ring_head - g_ring_tail;
+        if (n > sizeof chunk)
+            n = sizeof chunk;
+        for (size_t done = 0; done < n;) {
+            const size_t at = (g_ring_tail + done) % sizeof g_ring;
+            size_t part = sizeof g_ring - at;
+            if (part > n - done)
+                part = n - done;
+            memcpy(chunk + done, g_ring + at, part);
+            done += part;
+        }
+        g_ring_tail += n;
+        mutexUnlock(&g_ring_lock);
+        if (n == 0)
+            return;
+        write(g_log_fd, chunk, n);
+    }
+}
+
+static void log_thread(void *arg) {
+    (void)arg;
+    while (!g_log_stop) {
+        svcSleepThread(200000000ull);
+        log_drain();
+    }
+}
+
+static void log_start(void) {
+    g_log_fd = open(KAIHEN_ROOT "/UserData/Logs/kaihen.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (g_log_fd < 0 || AddDevice(&g_ring_device) < 0)
+        return;
+    const int ring = open("kaihenlog:/", O_WRONLY);
+    if (ring < 0)
+        return;
+    fflush(stdout);
+    dup2(ring, STDOUT_FILENO);
+    dup2(ring, STDERR_FILENO);
+    close(ring);
+    if (R_SUCCEEDED(threadCreate(&g_log_thread, log_thread, NULL, NULL, 0x4000, 0x3B, -2)))
+        threadStart(&g_log_thread);
+}
+
+/* At exit: the log thread ends, and the rest of the ring goes to the card. */
+static void log_finish(void) {
+    if (g_log_fd < 0)
+        return;
+    fflush(NULL);
+    if (g_log_thread.handle) {
+        g_log_stop = 1;
+        threadWaitForExit(&g_log_thread);
+        threadClose(&g_log_thread);
+        g_log_thread.handle = 0;
+    }
+    log_drain();
+    if (g_ring_dropped) {
+        char note[96];
+        const int n = snprintf(note, sizeof note, "[kaihen] %lu bytes of log dropped (the ring was full)\n",
+                               (unsigned long)g_ring_dropped);
+        write(g_log_fd, note, (size_t)n);
+    }
+    close(g_log_fd);
+    g_log_fd = -1;
+}
 static int g_nxlink = -1;
 
 /* --- startup ------------------------------------------------------------------------------ */
@@ -143,6 +262,7 @@ static void __attribute__((noreturn)) quit_now(const char *why) {
     fprintf(stderr, "[kaihen] %s: quitting\n", why);
     hbxl_cpu_clock_restore();
     fflush(NULL);
+    log_finish();
     __nx_applet_exit_mode = 1;
     const LoaderReturnFn loader_return = envGetExitFuncPtr();
     for (int i = 0; i < 8 && envGetExitFuncPtr() == loader_return; i++)
@@ -179,6 +299,7 @@ void kaihen_return_to_hbmenu(void) {
     hbxl_cpu_clock_restore();
     fprintf(stderr, "[kaihen] returning to hbmenu\n");
     fflush(NULL);
+    log_finish();
     __libnx_exit(0); /* services closed (userAppExit too, and the GPU driver's), then back to hbloader */
 }
 
@@ -220,15 +341,65 @@ static inline void copy_thread_pointer(void) {
     __asm__ volatile("msr tpidr_el0, %0" ::"r"(tp));
 }
 
+/* CPU cores, as HBLauncher's runtime placed them (hbxl_pin_next_thread, its sdk/linux/thread.c):
+ * the game thread keeps a core of its own, the runtime pins a few workers to cores of their own (GX
+ * and video 5, audio 3, aurora's GPU worker 4, HBLauncher's numbers, in which the game thread is on
+ * core 1), and every other thread may run on any core that is neither. libnx alone starts every
+ * pthread at the lowest priority with the game thread's core as its home, so the workers waited
+ * behind the game thread. */
+static Mutex g_cores_lock;
+static int g_game_core = -1, g_pin_core = -1;
+static u64 g_cores, g_pinned_cores;
+
+static int kaihen_core(int hblauncher_core) {
+    /* HBLauncher's game core (1) and this console's game core trade places. */
+    if (hblauncher_core == 1)
+        return g_game_core;
+    if (hblauncher_core == g_game_core)
+        return 1;
+    return hblauncher_core;
+}
+
+static void cores_start(void) {
+    svcGetInfo(&g_cores, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
+    g_game_core = (int)svcGetCurrentProcessorNumber();
+    svcSetThreadCoreMask(CUR_THREAD_HANDLE, g_game_core, 1ull << g_game_core);
+}
+
+void hbxl_pin_next_thread(int core) {
+    mutexLock(&g_cores_lock);
+    const int mapped = g_game_core >= 0 ? kaihen_core(core) : -1;
+    if (mapped >= 0 && mapped < 64 && mapped != g_game_core && ((g_cores >> mapped) & 1)) {
+        g_pin_core = mapped;
+        g_pinned_cores |= 1ull << mapped;
+    }
+    mutexUnlock(&g_cores_lock);
+}
+
 struct thread_start {
     void *(*function)(void *);
     void *argument;
+    int core; /* pinned, or -1 */
 };
 
 static void *start_with_thread_pointer(void *start) {
     const struct thread_start copy = *(struct thread_start *)start;
     free(start);
     copy_thread_pointer();
+    if (g_game_core >= 0) {
+        if (copy.core >= 0) {
+            svcSetThreadCoreMask(CUR_THREAD_HANDLE, copy.core, 1ull << copy.core);
+            svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2C);
+        } else {
+            mutexLock(&g_cores_lock);
+            u64 mask = g_cores & ~(1ull << g_game_core) & ~g_pinned_cores;
+            mutexUnlock(&g_cores_lock);
+            if (!mask)
+                mask = g_cores & ~(1ull << g_game_core);
+            if (mask)
+                svcSetThreadCoreMask(CUR_THREAD_HANDLE, __builtin_ctzll(mask), mask);
+        }
+    }
     return copy.function(copy.argument);
 }
 
@@ -238,7 +409,10 @@ int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(
     struct thread_start *start = malloc(sizeof *start);
     if (!start)
         return EAGAIN;
-    *start = (struct thread_start){function, argument};
+    mutexLock(&g_cores_lock);
+    *start = (struct thread_start){function, argument, g_pin_core};
+    g_pin_core = -1;
+    mutexUnlock(&g_cores_lock);
     const int rc = __real_pthread_create(thread, attr, start_with_thread_pointer, start);
     if (rc)
         free(start);
@@ -247,17 +421,14 @@ int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(
 
 void userAppInit(void) {
     copy_thread_pointer();
+    cores_start();
     socketInitializeDefault();
     /* With nxlink -s, stdout and stderr go to the PC; otherwise to the card. */
     g_nxlink = nxlinkStdio();
     mkdir(KAIHEN_ROOT "/UserData", 0777);
     mkdir(KAIHEN_ROOT "/UserData/Logs", 0777);
-    g_log = fopen(KAIHEN_ROOT "/UserData/Logs/kaihen.log", "w");
-    if (g_nxlink < 0 && g_log) {
-        fflush(stdout);
-        dup2(fileno(g_log), STDOUT_FILENO);
-        dup2(fileno(g_log), STDERR_FILENO);
-    }
+    if (g_nxlink < 0)
+        log_start();
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     load_settings();
@@ -270,14 +441,14 @@ void userAppInit(void) {
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     if (R_SUCCEEDED(threadCreate(&g_watchdog, watchdog, NULL, NULL, 0x10000, 0x2C, -2)))
         threadStart(&g_watchdog);
-    fprintf(stderr, "[kaihen] started, nxlink %s; hold + and - to quit\n", g_nxlink >= 0 ? "on" : "off");
+    fprintf(stderr, "[kaihen] started, nxlink %s; game thread on core %d of mask %lx; hold + and - to quit\n",
+            g_nxlink >= 0 ? "on" : "off", g_game_core, (unsigned long)g_cores);
 }
 
 void userAppExit(void) {
     if (!g_returning) {
         fprintf(stderr, "[kaihen] exit\n");
-        if (g_log)
-            fclose(g_log);
+        log_finish();
         if (g_nxlink >= 0)
             close(g_nxlink);
         socketExit();

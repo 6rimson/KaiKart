@@ -91,8 +91,13 @@ build() {
   sync_tree
   cmake --build "$OUT" --target "$PRODUCT" --parallel "$JOBS" "$@"
   local elf="$OUT/$PRODUCT.elf"
-  nacptool --create "WiiCompiled RR" "6rimson" "kaiHEN test" "$OUT/$PRODUCT.nacp"
-  elf2nro "$elf" "/dist/$PRODUCT.nro" --nacp="$OUT/$PRODUCT.nacp" --icon="$DEVKITPRO/libounce/default_icon.jpg"
+  # hbmenu's title, author and version, and the icon: kaihen/icon-<product>.jpg (256x256, kept out of
+  # git: it is the game's art) when it exists.
+  local title="Mario Kart Wii" icon="/host/kaihen/icon-$PRODUCT.jpg"
+  [[ "$PRODUCT" == RetroRewind ]] && title="Retro Rewind"
+  [[ -f "$icon" ]] || icon="$DEVKITPRO/libounce/default_icon.jpg"
+  nacptool --create "$title" "6rimson" "${KAIHEN_VERSION:-0.3.0}" "$OUT/$PRODUCT.nacp"
+  elf2nro "$elf" "/dist/$PRODUCT.nro" --nacp="$OUT/$PRODUCT.nacp" --icon="$icon"
   ls -la "/dist/$PRODUCT.nro"
 }
 
