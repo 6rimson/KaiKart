@@ -10,11 +10,11 @@ if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
 endif()
 project(mkw_recompiled)
 
-# kaiHEN builds with the Switch 2 devkit's GCC (kaihen/cmake/kaihen.cmake).
+# kaiHEN builds with Clang or the Switch 2 devkit's GCC (kaihen/cmake/kaihen.cmake).
 option(MKW_KAIHEN "Build for kaiHEN (native Switch 2 homebrew) with the Switch 2 devkit" OFF)
 if(MKW_KAIHEN)
-    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-        message(FATAL_ERROR "The kaiHEN build uses the Switch 2 devkit's GCC: kaihen/run.sh")
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+        message(FATAL_ERROR "The kaiHEN build uses Clang or the Switch 2 devkit's GCC: kaihen/run.sh")
     endif()
 elseif(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "WiiCompiled requires a 64-bit Clang toolchain")

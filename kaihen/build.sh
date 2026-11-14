@@ -1,12 +1,13 @@
 #!/bin/bash
-# Runs in the ounce-devkit image (kaihen/run.sh). /host: the repository (read only); /opt/work: the
+# Runs in the ounce-devkit-clang or ounce-devkit image (kaihen/run.sh). /host: the repository (read only); /opt/work: the
 # HBLauncher build volume (read only: the translated game and the patched Dawn and SDL3 sources);
 # /opt/kaihen: this build's volume; /dist: kaihen/dist on the host.
 set -euo pipefail
 source "$DEVKITPRO/switch2vars.sh" >/dev/null
 PRODUCT="${KAIHEN_PRODUCT:-RetroRewind}"
+COMPILER="${KAIHEN_COMPILER:-clang}"
 SRC=/opt/kaihen/src
-OUT=/opt/kaihen/build
+OUT="/opt/kaihen/build-$COMPILER"
 JOBS="${KAIHEN_JOBS:-$(nproc)}"
 
 sync_tree() {
@@ -43,9 +44,31 @@ deps() {
   done
 }
 
+# The shipped profile for this product (hblauncher/pgo/<product>.profdata.xz), unpacked under a name
+# with its content hash: Clang doesn't track the profile as a dependency, so a new one changes the
+# compile command. Clang only.
+pgo_options() {
+  local name
+  case "$PRODUCT" in RetroRewind) name=retro-rewind ;; *) name=wiicompiled ;; esac
+  local packed="$SRC/hblauncher/pgo/$name.profdata.xz"
+  if [[ "$COMPILER" != clang || "${KAIHEN_PGO:-1}" == 0 || ! -f "$packed" ]]; then
+    echo "-DMKW_PGO="
+    return
+  fi
+  mkdir -p /opt/kaihen/pgo
+  local hash
+  hash=$(xz -dc "$packed" | sha256sum | cut -c1-12)
+  local profile="/opt/kaihen/pgo/$name-$hash.profdata"
+  [[ -f "$profile" ]] || xz -dc "$packed" > "$profile"
+  echo "-DMKW_PGO=use -DMKW_PGO_PROFILE=$profile"
+}
+
 configure() {
   sync_tree
   deps
+  local pgo clang=OFF
+  read -ra pgo <<< "$(pgo_options)"
+  [[ "$COMPILER" == clang ]] && clang=ON
   local off=(DAWN_BUILD_PROTOBUF TINT_BUILD_IR_BINARY DAWN_USE_X11 DAWN_USE_WAYLAND DAWN_ENABLE_OPENGLES
     DAWN_ENABLE_DESKTOP_GL TINT_BUILD_GLSL_WRITER TINT_BUILD_HLSL_WRITER TINT_BUILD_MSL_WRITER
     TINT_BUILD_GLSL_VALIDATOR DAWN_USE_GLFW DAWN_SUPPORTS_GLFW_FOR_WINDOWING GLFW_BUILD_WAYLAND GLFW_BUILD_X11
@@ -56,7 +79,8 @@ configure() {
   cmake -S "$SRC/runtime" -B "$OUT" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE="$SRC/kaihen/cmake/kaihen.cmake" \
     -UCMAKE_C_FLAGS -UCMAKE_CXX_FLAGS -UCMAKE_ASM_FLAGS -UCMAKE_EXE_LINKER_FLAGS \
-    -DHBX_SWITCH2=ON -DMKW_KAIHEN=ON -DMKW_GUEST_FLAT_CHECKED_ONLY=ON -DMKW_AARCH64_CPU=cortex-a78c -DMKW_PGO= \
+    -DKAIHEN_CLANG=$clang "${pgo[@]}" \
+    -DHBX_SWITCH2=ON -DMKW_KAIHEN=ON -DMKW_GUEST_FLAT_CHECKED_ONLY=ON -DMKW_AARCH64_CPU=cortex-a78c \
     -DAURORA_DAWN_PROVIDER=vendor -DAURORA_DAWN_LINKAGE=static -DFETCHCONTENT_SOURCE_DIR_DAWN=/opt/kaihen/deps/dawn \
     -DAURORA_SDL3_PROVIDER=vendor -DAURORA_SDL3_LINKAGE=static -DFETCHCONTENT_SOURCE_DIR_SDL=/opt/kaihen/deps/sdl3 \
     -DHBX_SDK_INCLUDE=/opt/work/deps/hblauncher/sdk/include \

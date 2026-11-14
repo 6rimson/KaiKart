@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include <pthread.h>
 #include <switch.h>
 
 #define VK_USE_PLATFORM_VI_NN 1
@@ -209,7 +210,43 @@ static void watchdog(void *arg) {
     quit_now("no frame to return from");
 }
 
+/* Clang reads the thread pointer from TPIDR_EL0; libnx keeps it in the thread's TLS slot (GCC's
+ * -mtp=soft asks libnx). Each thread gets libnx's value in TPIDR_EL0, which the kernel keeps per
+ * thread: the main thread here, every pthread as it starts (link: --wrap=pthread_create). */
+void *__aarch64_read_tp(void);
+
+static inline void copy_thread_pointer(void) {
+    void *tp = __aarch64_read_tp();
+    __asm__ volatile("msr tpidr_el0, %0" ::"r"(tp));
+}
+
+struct thread_start {
+    void *(*function)(void *);
+    void *argument;
+};
+
+static void *start_with_thread_pointer(void *start) {
+    const struct thread_start copy = *(struct thread_start *)start;
+    free(start);
+    copy_thread_pointer();
+    return copy.function(copy.argument);
+}
+
+int __real_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*function)(void *), void *argument);
+
+int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*function)(void *), void *argument) {
+    struct thread_start *start = malloc(sizeof *start);
+    if (!start)
+        return EAGAIN;
+    *start = (struct thread_start){function, argument};
+    const int rc = __real_pthread_create(thread, attr, start_with_thread_pointer, start);
+    if (rc)
+        free(start);
+    return rc;
+}
+
 void userAppInit(void) {
+    copy_thread_pointer();
     socketInitializeDefault();
     /* With nxlink -s, stdout and stderr go to the PC; otherwise to the card. */
     g_nxlink = nxlinkStdio();
