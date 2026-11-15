@@ -1897,6 +1897,53 @@ void ConsoleChangeVolume(int delta) {
     RuntimeConfigFile::SetAudioVolume(static_cast<float>(g_audioVolumePercent) / 100.0f);
 }
 
+#if defined(MKW_KAIHEN)
+// CPU, memory and GPU clocks (kaihen/platform/kaihen_platform.c): steps chosen here, applied at
+// once and kept in hbxl-env. 0 is the system's own rate. On battery the console halves the CPU's
+// real speed when memory or the GPU run above its rates, so those two run as chosen only on a
+// charger, and at the system's on battery; the CPU keeps its rate either way.
+extern "C" uint32_t kaihen_clock_chosen_mhz(int clock);
+extern "C" uint32_t kaihen_clock_max_mhz(int clock);
+extern "C" uint32_t kaihen_clock_now_hz(int clock);
+extern "C" int kaihen_clock_choose_mhz(int clock, uint32_t mhz);
+extern "C" uint32_t kaihen_cpu_clock_chosen_mhz(void);
+extern "C" uint32_t kaihen_cpu_clock_now_hz(void);
+extern "C" int kaihen_cpu_clock_choose_mhz(uint32_t mhz);
+extern "C" int kaihen_power_plugged(void);
+// Rates the console runs at (it rounds others to its own steps: 1300 runs 1292.8, 2666 runs 2750).
+// System is 1100.8 MHz for the CPU, 2133 for memory and 561 for the GPU, handheld.
+constexpr std::array<uint32_t, 4> kConsoleCpuSteps{0, 1293, 1498, 1702};
+constexpr std::array<uint32_t, 4> kConsoleMemorySteps{0, 2750, 3200, 3750};
+constexpr std::array<uint32_t, 5> kConsoleGpuSteps{0, 778, 1007, 1262, 1389};
+constexpr int kConsoleOptionRows = 6;
+
+template <size_t N>
+int ConsoleStepIndex(const std::array<uint32_t, N>& steps, uint32_t chosen, int change) {
+    int index = 0;
+    for (int i = 0; i < static_cast<int>(N); ++i) {
+        if (steps[static_cast<size_t>(i)] == chosen) index = i;
+    }
+    return (index + change + static_cast<int>(N)) % static_cast<int>(N);
+}
+
+template <size_t N>
+void ConsoleStepClock(int clock, const std::array<uint32_t, N>& steps, int change) {
+    const uint32_t max = kaihen_clock_max_mhz(clock);
+    uint32_t chosen = kaihen_clock_chosen_mhz(clock);
+    for (size_t tries = 0; tries < N; ++tries) {
+        chosen = steps[static_cast<size_t>(ConsoleStepIndex(steps, chosen, change))];
+        if (chosen == 0 || max == 0 || chosen <= max + 1) {
+            kaihen_clock_choose_mhz(clock, chosen);
+            return;
+        }
+    }
+}
+
+std::string ConsoleMhzText(uint32_t mhz) { return mhz == 0 ? std::string("System") : std::to_string(mhz) + " MHz"; }
+#else
+constexpr int kConsoleOptionRows = 6;
+#endif
+
 void ConsoleMenuInput(int rows) {
     auto* pad = ConsolePad();
     if (pad == nullptr) {
@@ -1927,7 +1974,7 @@ void ConsoleMenuInput(int rows) {
             if (pressed(SDL_GAMEPAD_BUTTON_DPAD_LEFT)) change = -1;
             if (pressed(SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) change = 1;
             const bool confirm = pressed(SDL_GAMEPAD_BUTTON_EAST);
-            const int firstButton = 6;
+            const int firstButton = kConsoleOptionRows;
             if (g_consoleMenuRow == 0 && change != 0) {
                 const int count = static_cast<int>(kConsoleScales.size());
                 SetResolutionScale(kConsoleScales[(ConsoleScaleIndex() + count + change) % count]);
@@ -1937,13 +1984,29 @@ void ConsoleMenuInput(int rows) {
             } else if (g_consoleMenuRow == 2 && change != 0) {
                 ConsoleChangeVolume(change * 5);
             } else if (g_consoleMenuRow == 3 && (change != 0 || confirm)) {
+#if defined(MKW_KAIHEN)
+                kaihen_cpu_clock_choose_mhz(kConsoleCpuSteps[static_cast<size_t>(
+                    ConsoleStepIndex(kConsoleCpuSteps, kaihen_cpu_clock_chosen_mhz(), change != 0 ? change : 1))]);
+#else
                 ConsoleSetCpuBoost(g_consoleBoostMode == 0 ? 1 : 0, true);
+#endif
+#if defined(MKW_KAIHEN)
+            // kaiHEN: no race GX worker or frame skip rows (the worker stays on, frame skip off).
+            } else if ((g_consoleMenuRow == 4 || g_consoleMenuRow == 5) && (change != 0 || confirm)) {
+                const int step = change != 0 ? change : 1;
+                if (g_consoleMenuRow == 4) {
+                    ConsoleStepClock(0, kConsoleMemorySteps, step);
+                } else {
+                    ConsoleStepClock(1, kConsoleGpuSteps, step);
+                }
+#else
             } else if (g_consoleMenuRow == 4 && (change != 0 || confirm)) {
                 GxWorker::SetRaceDeferring(!GxWorker::RaceDeferring());
                 RT_LOGF("perf", "race GX worker %s\n", GxWorker::RaceDeferring() ? "on" : "off");
             } else if (g_consoleMenuRow == 5 && (change != 0 || confirm)) {
                 SetRetroRewindFrameSkip(!RetroRewindFrameSkip());
                 RT_LOGF("perf", "frame skip %s\n", RetroRewindFrameSkip() ? "on" : "off");
+#endif
             } else if (g_consoleMenuRow >= firstButton && g_consoleMenuRow < rows - 2 && confirm) {
                 const auto& button = kControllerButtons[static_cast<size_t>(g_consoleMenuRow - firstButton)];
                 g_controllerPort = 0;
@@ -1983,7 +2046,7 @@ const char* ConsoleNativeButtonName(uint32_t native) {
 
 void DrawConsoleMenu() {
     const int buttons = static_cast<int>(kControllerButtons.size());
-    const int rows = 6 + buttons + 2;
+    const int rows = kConsoleOptionRows + buttons + 2;
     const bool wasOpen = g_consoleMenuOpen;
     // CPU boost on at launch (see ConsoleSetCpuBoost). MKW_CPU_BOOST=0 in hbxl-env leaves it off; another
     // number picks the nn::oe boost mode when the launcher has no clock access.
@@ -2031,10 +2094,27 @@ void DrawConsoleMenu() {
         row(0, std::string("Resolution: ") + scale);
         row(1, std::string("Show FPS: ") + (g_showFps ? "On" : "Off"));
         row(2, "Volume: " + std::to_string(g_audioVolumePercent) + "%");
-        row(3, std::string("CPU boost: ") + (g_consoleCpuAtMax ? "On (max)" : g_consoleBoostMode != 0 ? "On" : "Off"));
+#if defined(MKW_KAIHEN)
+        row(3, "CPU clock: " + ConsoleMhzText(kaihen_cpu_clock_chosen_mhz()));
+        row(4, "Memory clock: " + ConsoleMhzText(kaihen_clock_chosen_mhz(0)));
+        row(5, "GPU clock: " + ConsoleMhzText(kaihen_clock_chosen_mhz(1)));
+        if (kaihen_power_plugged()) {
+            ImGui::TextDisabled("  Power: plugged in. Memory and GPU run as chosen.");
+        } else {
+            ImGui::TextDisabled("  Power: battery. Memory and GPU at System until plugged in.");
+        }
+        // Debug only (MKW_PERF_STATS=1): the CPU's measured speed, to see the console halve it. It
+        // is a timed loop, so a percent or so under the setting. Remove before release.
+        if (PerfStats::Enabled()) {
+            ImGui::TextDisabled("  Now: CPU about %.0f MHz (set %.0f), memory %.0f MHz, GPU %.0f MHz",
+                                static_cast<double>(PerfStats::CurrentCpuMhz()), kaihen_cpu_clock_now_hz() / 1e6,
+                                kaihen_clock_now_hz(0) / 1e6, kaihen_clock_now_hz(1) / 1e6);
+        }
+#else
         row(4, std::string("Race GX worker: ") + (GxWorker::RaceDeferring() ? "On" : "Off"));
         row(5, std::string("Frame skip (offline): ") + (RetroRewindFrameSkip() ? "On" : "Off"));
         ImGui::TextDisabled("  CPU speed: about %.0f MHz", static_cast<double>(g_consoleCpuMhz));
+#endif
         ImGui::Separator();
         uint32_t count = 0;
         auto* mappings = PADGetButtonMappings(0, &count);
@@ -2044,7 +2124,7 @@ void DrawConsoleMenu() {
             for (uint32_t m = 0; mappings != nullptr && m < count; ++m) {
                 if (mappings[m].padButton == button.padButton) native = mappings[m].nativeButton;
             }
-            row(6 + i, std::string(button.label) + ": " + ConsoleNativeButtonName(native));
+            row(kConsoleOptionRows + i, std::string(button.label) + ": " + ConsoleNativeButtonName(native));
         }
         ImGui::Separator();
         row(rows - 2, "Reset buttons to default");

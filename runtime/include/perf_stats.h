@@ -16,6 +16,8 @@ bool Enabled() noexcept;
 void LogCoreCalibration(const uint8_t* guestRam, size_t size);
 // Rough CPU clock from a two-cycle integer loop; takes about 40 ms.
 float MeasureCpuMhz();
+// The CPU clock the freeze watchdog measured last (about once a second; 0 before the first frame).
+float CurrentCpuMhz();
 #endif
 enum class WaitKind { Pacing, Audio, Gx, Other, Count };
 void AddWait(std::chrono::steady_clock::duration wait, WaitKind kind) noexcept;

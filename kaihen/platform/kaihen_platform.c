@@ -4,7 +4,8 @@
  *   - startup (userAppInit, before main): sockets, the log, the settings in hbxl-env, the folder;
  *   - the screen: libnx's default NWindow, which Dawn presents to through VK_NN_vi_surface;
  *   - Vulkan: OunceVK, linked in;
- *   - the CPU clock: clkrst, directly (the app may use it on kaiHEN);
+ *   - the CPU, GPU and memory clocks: clkrst, directly (the app may use it on kaiHEN), and the
+ *     power state (psm): memory and GPU run raised only on a charger;
  *   - input and audio: SDL's HBLauncher drivers, fed from libnx (hid and audout) through an
  *     hbx context of this file's own. */
 #include <errno.h>
@@ -189,6 +190,9 @@ static void load_settings(void) {
 }
 
 void hbxl_cpu_clock_restore(void);
+static void extra_clocks_set(void);
+static void power_check(void);
+static void power_close(void);
 void __libnx_exit(int rc) __attribute__((noreturn));
 
 /* --- sampling profiler (KAIHEN_PROFILE=1 in hbxl-env) ------------------------------------------ */
@@ -382,6 +386,8 @@ int kaihen_return_requested(void) { return g_return_requested; }
 /* The game's other threads still run until hbloader parks them and may still log: userAppExit
  * leaves the log open on this path. */
 static volatile int g_returning;
+static int g_exit_fd = -1; /* UserData/Logs/exit.txt while returning (step) */
+static void step(const char *name);
 static Thread g_watchdog;
 
 void kaihen_return_to_hbmenu(void) {
@@ -391,11 +397,14 @@ void kaihen_return_to_hbmenu(void) {
     g_returning = 1;
     threadWaitForExit(&g_watchdog);
     threadClose(&g_watchdog);
+    power_close();
     hbxl_cpu_clock_restore();
     fprintf(stderr, "[kaihen] returning to hbmenu\n");
     profiler_finish();
     fflush(NULL);
     log_finish();
+    g_exit_fd = open(KAIHEN_ROOT "/UserData/Logs/exit.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    step("log closed");
     __libnx_exit(0); /* services closed (userAppExit too, and the GPU driver's), then back to hbloader */
 }
 
@@ -407,8 +416,10 @@ static void watchdog(void *arg) {
     copy_thread_pointer();
     PadState pad;
     padInitializeDefault(&pad);
-    int held = 0;
+    int held = 0, ticks = 0;
     while (!g_returning && appletMainLoop()) {
+        if (ticks++ % 20 == 0)
+            power_check(); /* once a second */
         padUpdate(&pad);
         const u64 buttons = padGetButtons(&pad);
         held = (buttons & HidNpadButton_Plus) && (buttons & HidNpadButton_Minus) ? held + 1 : 0;
@@ -519,6 +530,7 @@ void userAppInit(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     load_settings();
+    extra_clocks_set();
     sqlite_setup();
     /* As HBLauncher's environment: SDL draws nothing itself (aurora presents through Dawn to the
      * NWindow), so its offscreen video driver. hbxl-env wins. */
@@ -551,11 +563,20 @@ void __nx_gpu_exit(void) __attribute__((weak));
 void __nx_win_exit(void) __attribute__((weak));
 void __nx_exit(Result rc, LoaderReturnFn retaddr) __attribute__((noreturn));
 
+/* Returning to hbmenu: each step goes to nxlink when it is on, and to UserData/Logs/exit.txt on the
+ * card (the log is closed by then), flushed each time, so the last one written is where a failed
+ * return stopped (g_exit_fd, opened in kaihen_return_to_hbmenu). */
+
 static void step(const char *name) {
-    if (g_returning && g_nxlink >= 0) {
-        char line[96];
-        const int n = snprintf(line, sizeof line, "[kaihen] exit: %s\n", name);
+    if (!g_returning)
+        return;
+    char line[96];
+    const int n = snprintf(line, sizeof line, "[kaihen] exit: %s\n", name);
+    if (g_nxlink >= 0)
         write(STDERR_FILENO, line, (size_t)n);
+    if (g_exit_fd >= 0) {
+        write(g_exit_fd, line, (size_t)n);
+        fsync(g_exit_fd);
     }
 }
 
@@ -578,7 +599,7 @@ void __appExit(void) {
          * own file system session. */
         step("closing files");
         for (int fd = 3; fd < 1024; fd++)
-            if (fd != g_nxlink)
+            if (fd != g_nxlink && fd != g_exit_fd)
                 close(fd);
         step("file system left open");
     } else {
@@ -594,6 +615,11 @@ void __appExit(void) {
     step("sockets");
     if (g_returning)
         socketExit();
+    step("done, back to hbloader");
+    if (g_exit_fd >= 0) {
+        close(g_exit_fd);
+        g_exit_fd = -1;
+    }
     smExit();
 }
 
@@ -758,49 +784,333 @@ __attribute__((constructor)) static void fill_audio_table(void) {
     };
 }
 
-/* --- CPU clock ----------------------------------------------------------------------------- */
+/* --- clocks -------------------------------------------------------------------------------- */
+/* All three are chosen in the port menu (settings_overlay.cpp, through kaihen_clock_*) and kept in
+ * hbxl-env: KAIHEN_CPU_MHZ, KAIHEN_MEMORY_MHZ, KAIHEN_GPU_MHZ, each a rate in MHz, "max" (the top
+ * of what the system offers) or 0 (the system's own rate). Defaults: the CPU at its stock maximum
+ * (1702.4 MHz, applied by the runtime's CPU boost at launch), memory and GPU at the system's.
+ *
+ * On battery, the console halves the CPU's real speed (clkrst still reads the rate it was set to)
+ * as soon as the GPU runs above 561 MHz or memory at 2750 MHz or more, handheld; on a supported
+ * charger it doesn't (tested in this port and the Cemu-nx Switch 2 port, 2026-11-14). So memory and
+ * GPU run at the chosen rates only while the console says enough power is supplied, and go back to
+ * the system's when it is unplugged; the CPU keeps its rate either way. The watchdog checks once a
+ * second. The launch rates go back on exit (hbxl_cpu_clock_restore). */
 
 static const uint32_t kMaxHz = 1702400000u;
-static uint32_t g_launch_hz;
-static int g_clock_ready, g_raised;
+static Mutex g_clock_lock;
+static uint32_t g_launch_hz, g_cpu_chosen_mhz = 1702;
+static int g_clkrst, g_clock_ready, g_raised;
 static ClkrstSession g_cpu;
+
+static int clkrst_open(void) {
+    if (!g_clkrst)
+        g_clkrst = R_SUCCEEDED(clkrstInitialize()) ? 1 : -1;
+    return g_clkrst > 0;
+}
 
 static int clock_open(void) {
     if (g_clock_ready)
         return g_clock_ready > 0;
     g_clock_ready = -1;
-    if (R_FAILED(clkrstInitialize()))
+    if (!clkrst_open())
         return 0;
-    if (R_FAILED(clkrstOpenSession(&g_cpu, PcvModuleId_CpuBus, 3)) ||
-        R_FAILED(clkrstGetClockRate(&g_cpu, &g_launch_hz)) || g_launch_hz >= kMaxHz) {
-        clkrstExit();
+    if (R_FAILED(clkrstOpenSession(&g_cpu, PcvModuleId_CpuBus, 3)))
+        return 0;
+    if (R_FAILED(clkrstGetClockRate(&g_cpu, &g_launch_hz)) || g_launch_hz >= kMaxHz) {
+        clkrstCloseSession(&g_cpu);
         return 0;
     }
+    const char *want = getenv("KAIHEN_CPU_MHZ");
+    if (want && strcmp(want, "max") == 0)
+        g_cpu_chosen_mhz = kMaxHz / 1000000u;
+    else if (want && *want)
+        g_cpu_chosen_mhz = (uint32_t)strtoul(want, NULL, 10);
+    if (g_cpu_chosen_mhz > kMaxHz / 1000000u)
+        g_cpu_chosen_mhz = kMaxHz / 1000000u;
     g_clock_ready = 1;
     return 1;
 }
 
+/* The CPU rate for a choice: 0 is the launch rate; 1702 means 1702.4. */
+static uint32_t cpu_rate(uint32_t mhz) {
+    if (mhz == 0)
+        return g_launch_hz;
+    const uint32_t hz = mhz * 1000000u;
+    return hz + 999999u >= kMaxHz ? kMaxHz : hz;
+}
+
+typedef struct {
+    const char *name, *setting;
+    PcvModuleId module;
+    ClkrstSession session;
+    int open;
+    uint32_t launch_hz, lo, hi, chosen_mhz, applied_hz, now_hz;
+    PcvClockRatesListType type;
+    s32 count;
+    u32 rates[32];
+} ExtraClock;
+
+static ExtraClock g_extra[] = {
+    {"memory", "KAIHEN_MEMORY_MHZ", PcvModuleId_EMC},
+    {"GPU", "KAIHEN_GPU_MHZ", PcvModuleId_GPU},
+};
+enum { kExtraClocks = sizeof g_extra / sizeof g_extra[0] };
+
+/* 1: a charger that supplies enough power, 0: battery (or not known). Set by power_check. */
+static int g_psm, g_plugged = -1;
+static uint32_t g_cpu_now_hz;
+
+static int power_plugged(void) {
+    if (!g_psm)
+        g_psm = R_SUCCEEDED(psmInitialize()) ? 1 : -1;
+    if (g_psm < 0)
+        return 0;
+    PsmChargerType charger = PsmChargerType_Unconnected;
+    bool enough = false;
+    if (R_FAILED(psmGetChargerType(&charger)) || R_FAILED(psmIsEnoughPowerSupplied(&enough)))
+        return 0;
+    return charger != PsmChargerType_Unconnected && enough;
+}
+
+/* The rate the system will take for a choice in MHz: clamped to its range, or the highest listed
+ * step at or below it ("1389" matches a 1389.x step). */
+static uint32_t extra_rate(const ExtraClock *c, uint32_t mhz) {
+    const uint32_t hz = mhz * 1000000u, slack = 999999u;
+    if (c->count <= 0)
+        return hz;
+    if (c->type == PcvClockRatesListType_Range && c->count >= 2)
+        return hz < c->lo ? c->lo : hz > c->hi ? c->hi : hz;
+    uint32_t best = 0;
+    for (s32 i = 0; i < c->count && i < 32; i++)
+        if (c->rates[i] <= hz + slack && c->rates[i] > best)
+            best = c->rates[i];
+    return best ? best : c->lo;
+}
+
+static int extra_open(ExtraClock *c) {
+    if (c->open)
+        return c->open > 0;
+    c->open = -1;
+    if (!clkrst_open() || R_FAILED(clkrstOpenSession(&c->session, c->module, 3)))
+        return 0;
+    if (R_FAILED(clkrstGetClockRate(&c->session, &c->launch_hz))) {
+        clkrstCloseSession(&c->session);
+        return 0;
+    }
+    c->applied_hz = c->now_hz = c->launch_hz;
+    if (R_SUCCEEDED(clkrstGetPossibleClockRates(&c->session, c->rates, 32, &c->type, &c->count)) && c->count > 0) {
+        const int range = c->type == PcvClockRatesListType_Range && c->count >= 2;
+        const s32 n = range ? 2 : (c->count < 32 ? c->count : 32);
+        c->lo = c->hi = c->rates[0];
+        for (s32 i = 1; i < n; i++) {
+            c->lo = c->rates[i] < c->lo ? c->rates[i] : c->lo;
+            c->hi = c->rates[i] > c->hi ? c->rates[i] : c->hi;
+        }
+    } else {
+        c->count = 0;
+    }
+    c->open = 1;
+    return 1;
+}
+
+/* Puts a clock at its chosen rate when plugged in, at the launch rate otherwise. Call with
+ * g_clock_lock held. */
+static void extra_update(ExtraClock *c) {
+    if (c->open <= 0)
+        return;
+    const uint32_t target = c->chosen_mhz && g_plugged > 0 ? extra_rate(c, c->chosen_mhz) : c->launch_hz;
+    if (target == c->applied_hz)
+        return;
+    const Result rc = clkrstSetClockRate(&c->session, target);
+    clkrstGetClockRate(&c->session, &c->now_hz);
+    if (R_SUCCEEDED(rc))
+        c->applied_hz = target;
+    fprintf(stderr, "[kaihen] %s clock %.1f MHz (%s; rc 0x%x), reads %.1f MHz\n", c->name, target / 1e6,
+            c->chosen_mhz == 0 ? "the system's" : g_plugged > 0 ? "chosen" : "the system's on battery", (unsigned)rc,
+            c->now_hz / 1e6);
+}
+
+static uint32_t parse_mhz(const char *want, uint32_t max_hz) {
+    if (!want || !*want)
+        return 0;
+    if (strcmp(want, "max") == 0)
+        return max_hz / 1000000u;
+    const unsigned long mhz = strtoul(want, NULL, 10);
+    return mhz > 4000 ? 0 : (uint32_t)mhz;
+}
+
+static void extra_clocks_set(void) {
+    mutexLock(&g_clock_lock);
+    g_plugged = power_plugged();
+    fprintf(stderr, "[kaihen] power: %s\n", g_plugged ? "plugged in" : "battery");
+    for (int i = 0; i < kExtraClocks; i++) {
+        ExtraClock *c = &g_extra[i];
+        if (!extra_open(c)) {
+            fprintf(stderr, "[kaihen] %s clock: no session\n", c->name);
+            continue;
+        }
+        c->chosen_mhz = parse_mhz(getenv(c->setting), c->hi);
+        fprintf(stderr, "[kaihen] %s clock %.1f MHz at launch, chosen %u MHz (offers %.1f-%.1f)\n", c->name,
+                c->launch_hz / 1e6, (unsigned)c->chosen_mhz, c->lo / 1e6, c->hi / 1e6);
+        extra_update(c);
+    }
+    mutexUnlock(&g_clock_lock);
+}
+
+/* Once a second, from the watchdog: the power state, and each clock's rate for the menu. */
+static void power_check(void) {
+    const int plugged = power_plugged();
+    mutexLock(&g_clock_lock);
+    if (plugged != g_plugged) {
+        g_plugged = plugged;
+        fprintf(stderr, "[kaihen] power: %s\n", plugged ? "plugged in" : "battery");
+        for (int i = 0; i < kExtraClocks; i++)
+            extra_update(&g_extra[i]);
+    }
+    for (int i = 0; i < kExtraClocks; i++)
+        if (g_extra[i].open > 0)
+            clkrstGetClockRate(&g_extra[i].session, &g_extra[i].now_hz);
+    if (g_clock_ready > 0)
+        clkrstGetClockRate(&g_cpu, &g_cpu_now_hz);
+    mutexUnlock(&g_clock_lock);
+}
+
+/* Closes the psm session once the watchdog has stopped: a return to hbmenu with it still open ended
+ * in "the software needed to close". */
+static void power_close(void) {
+    if (g_psm > 0)
+        psmExit();
+    g_psm = -1;
+}
+
+static void extra_clocks_restore(void) {
+    mutexLock(&g_clock_lock);
+    for (int i = 0; i < kExtraClocks; i++) {
+        ExtraClock *c = &g_extra[i];
+        if (c->open <= 0)
+            continue;
+        if (c->applied_hz != c->launch_hz)
+            clkrstSetClockRate(&c->session, c->launch_hz);
+        uint32_t now = 0;
+        clkrstGetClockRate(&c->session, &now);
+        fprintf(stderr, "[kaihen] at exit: %s clock back to %.1f MHz, reads %.1f\n", c->name, c->launch_hz / 1e6,
+                now / 1e6);
+        clkrstCloseSession(&c->session);
+        c->open = 0;
+    }
+    mutexUnlock(&g_clock_lock);
+}
+
+/* hbxl-env with one KEY=VALUE line set: an existing line (commented out or not) is replaced. */
+static void save_setting(const char *key, const char *value) {
+    FILE *f = fopen(KAIHEN_ROOT "/hbxl-env", "r");
+    char *text = NULL;
+    size_t size = 0;
+    FILE *out = open_memstream(&text, &size);
+    if (!out) {
+        if (f)
+            fclose(f);
+        return;
+    }
+    const size_t key_len = strlen(key);
+    int written = 0;
+    char line[512];
+    while (f && fgets(line, sizeof line, f)) {
+        const char *name = line;
+        while (*name == '#' || *name == ' ')
+            name++;
+        if (strncmp(name, key, key_len) == 0 && name[key_len] == '=') {
+            if (!written)
+                fprintf(out, "%s=%s\n", key, value);
+            written = 1;
+            continue;
+        }
+        fputs(line, out);
+    }
+    if (f)
+        fclose(f);
+    if (!written)
+        fprintf(out, "%s=%s\n", key, value);
+    fclose(out);
+    f = fopen(KAIHEN_ROOT "/hbxl-env", "w");
+    if (f) {
+        fwrite(text, 1, size, f);
+        fclose(f);
+    }
+    free(text);
+}
+
+static void save_mhz(const char *key, uint32_t mhz) {
+    char value[16];
+    snprintf(value, sizeof value, "%u", (unsigned)mhz);
+    save_setting(key, value);
+}
+
+/* For the port menu. Clock 0 is memory, 1 the GPU; the CPU has its own calls. Rates read are the
+ * watchdog's from the last second: no system call on the game thread. */
+int kaihen_clock_count(void) { return kExtraClocks; }
+const char *kaihen_clock_name(int i) { return i >= 0 && i < kExtraClocks ? g_extra[i].name : ""; }
+uint32_t kaihen_clock_chosen_mhz(int i) { return i >= 0 && i < kExtraClocks ? g_extra[i].chosen_mhz : 0; }
+uint32_t kaihen_clock_max_mhz(int i) {
+    return i >= 0 && i < kExtraClocks && g_extra[i].open > 0 ? g_extra[i].hi / 1000000u : 0;
+}
+uint32_t kaihen_clock_now_hz(int i) { return i >= 0 && i < kExtraClocks ? g_extra[i].now_hz : 0; }
+int kaihen_power_plugged(void) { return g_plugged > 0; }
+
+int kaihen_clock_choose_mhz(int i, uint32_t mhz) {
+    if (i < 0 || i >= kExtraClocks)
+        return -1;
+    mutexLock(&g_clock_lock);
+    g_extra[i].chosen_mhz = mhz;
+    extra_update(&g_extra[i]);
+    mutexUnlock(&g_clock_lock);
+    save_mhz(g_extra[i].setting, mhz);
+    return 0;
+}
+
+uint32_t kaihen_cpu_clock_chosen_mhz(void) { return clock_open() ? g_cpu_chosen_mhz : 0; }
+uint32_t kaihen_cpu_clock_now_hz(void) { return g_cpu_now_hz; }
+
+/* The runtime's CPU boost (settings_overlay.cpp ConsoleSetCpuBoost): on is the chosen rate. */
 int hbxl_cpu_clock_rates(uint32_t *launch_hz, uint32_t *max_hz) {
     if (!clock_open())
         return 0;
     *launch_hz = g_launch_hz;
-    *max_hz = kMaxHz;
+    *max_hz = cpu_rate(g_cpu_chosen_mhz);
     return 1;
 }
 
 long hbxl_cpu_clock_boost(int on) {
     if (!clock_open())
         return -ENODEV;
-    uint32_t want = on ? kMaxHz : g_launch_hz, now = 0;
-    if (R_FAILED(clkrstSetClockRate(&g_cpu, want)) || R_FAILED(clkrstGetClockRate(&g_cpu, &now)))
+    const uint32_t want = on ? cpu_rate(g_cpu_chosen_mhz) : g_launch_hz;
+    uint32_t now = 0;
+    mutexLock(&g_clock_lock);
+    const Result rc = clkrstSetClockRate(&g_cpu, want);
+    if (R_SUCCEEDED(rc))
+        clkrstGetClockRate(&g_cpu, &now);
+    g_cpu_now_hz = now;
+    mutexUnlock(&g_clock_lock);
+    if (R_FAILED(rc))
         return -EIO;
-    if (now != want)
-        return -EAGAIN;
-    g_raised = on;
+    g_raised = on && want != g_launch_hz;
     return 0;
 }
 
+int kaihen_cpu_clock_choose_mhz(uint32_t mhz) {
+    if (!clock_open())
+        return -1;
+    g_cpu_chosen_mhz = mhz;
+    save_mhz("KAIHEN_CPU_MHZ", mhz);
+    const long rc = hbxl_cpu_clock_boost(1);
+    fprintf(stderr, "[kaihen] CPU clock %.1f MHz (%s), reads %.1f MHz\n", cpu_rate(mhz) / 1e6,
+            mhz ? "chosen" : "the system's", g_cpu_now_hz / 1e6);
+    return (int)rc;
+}
+
 void hbxl_cpu_clock_restore(void) {
+    extra_clocks_restore();
     if (g_clock_ready > 0 && g_raised)
         hbxl_cpu_clock_boost(0);
 }
