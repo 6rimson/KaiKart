@@ -113,8 +113,9 @@ mkdir -p build/retro-wfc/binary
 curl -fsSL --retry 3 "https://rwfc.net/api/wfc/payload?g=RMCPD00" -o build/retro-wfc/binary/payload.RMCPD00.bin
 ```
 
-**Optional: hbmenu's icon.** Save a 256×256 JPEG as `kaihen/icon-RetroRewind.jpg` (or
-`icon-WiiCompiled.jpg`). Without one, hbmenu shows the devkit's default icon. It's kept out of git.
+**Optional: your own hbmenu icon.** The app comes with WiiCompiled's own app icon
+(`kaihen/icons/`). To use a different one, save a 256×256 JPEG as `kaihen/icon-RetroRewind.jpg` (or
+`icon-WiiCompiled.jpg`). It's kept out of git.
 
 ### 3. Build
 
@@ -182,7 +183,8 @@ KAIHEN_PRODUCT=WiiCompiled kaihen/run.sh setup
 KAIHEN_PRODUCT=WiiCompiled kaihen/run.sh sd /Volumes/SWITCH
 ```
 
-It shares the card's `wiicompiled` folder (settings and saves) with Retro Rewind.
+It shows in hbmenu as WiiCompiled and shares the card's `wiicompiled` folder (settings and saves)
+with Retro Rewind.
 
 ### Updating
 
