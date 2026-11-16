@@ -5,7 +5,11 @@
 # libraries (every global and call assumed replaceable at load time), and that code is the hot path.
 # Everything else keeps -fPIC: with -fPIE throughout, the game crashed once its GPU device was up.
 pie=0
-case "$*" in *build_shards*|*retro_rewind_full_cpp*|*/generated/*) pie=1 ;; esac
+# A target's precompiled header must match its sources: the translated targets' headers are -fPIE
+# too (only mkw_base_shared has one today).
+case "$*" in
+  *build_shards*|*retro_rewind_full_cpp*|*/generated/*|*mkw_base_*.dir/cmake_pch*|*mkw_retro_*.dir/cmake_pch*) pie=1 ;;
+esac
 args=()
 for arg in "$@"; do
   case "$arg" in

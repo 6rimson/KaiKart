@@ -1,13 +1,13 @@
-/* kaiHEN (native Switch 2 homebrew) stand-ins for what HBLauncher's runtime gave the game, on
- * libounce (libnx for Switch 2). The game's files are those of the HBLauncher microSD layout:
- * sdmc:/wiicompiled/ holds portable.txt, UserData/, disc/ and RetroRewind/.
- *   - startup (userAppInit, before main): sockets, the log, the settings in hbxl-env, the folder;
+/* The kaiHEN platform layer (native Switch 2 homebrew on libounce, libnx for Switch 2): what the
+ * shared Switch 2 runtime expects from the system. The game's files are in sdmc:/wiicompiled/
+ * (kaihen/sd.py): portable.txt, settings.env, UserData/, disc/ and RetroRewind/.
+ *   - startup (userAppInit, before main): sockets, the log, the settings in settings.env, the folder;
  *   - the screen: libnx's default NWindow, which Dawn presents to through VK_NN_vi_surface;
  *   - Vulkan: OunceVK, linked in;
  *   - the CPU, GPU and memory clocks: clkrst, directly (the app may use it on kaiHEN), and the
  *     power state (psm): memory and GPU run raised only on a charger;
- *   - input and audio: SDL's HBLauncher drivers, fed from libnx (hid and audout) through an
- *     hbx context of this file's own. */
+ *   - input and audio: SDL's kaiHEN drivers (kaihen/patches/sdl3-kaihen.diff), on libnx's pad and
+ *     audout; this file configures the pad at startup. */
 #include <errno.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -23,8 +23,6 @@
 #define VK_USE_PLATFORM_VI_NN 1
 #include <vulkan/vulkan.h>
 
-#include "hbx_app.h" /* HBLauncher SDK: struct hbx_ctx, struct hbx_input_state */
-#include "hbx_sdk.h"
 
 #define KAIHEN_ROOT "sdmc:/wiicompiled"
 
@@ -41,10 +39,6 @@ static inline void copy_thread_pointer(void) {
 }
 
 
-/* SDL's HBLauncher drivers read this: the joystick driver needs it set, the audio driver calls
- * its audio table (filled below). Nothing else in it is used. */
-static struct hbx_ctx g_ctx;
-const struct hbx_ctx *hbxl_ctx = &g_ctx;
 
 /* --- the card log ------------------------------------------------------------------------------ */
 /* Without nxlink, stdout and stderr go to UserData/Logs/kaihen.log. Writing each line to the card
@@ -171,9 +165,15 @@ static int g_nxlink = -1;
 
 /* --- startup ------------------------------------------------------------------------------ */
 
-/* hbxl-env: KEY=VALUE lines, # comments, as HBLauncher reads them. */
+/* settings.env: KEY=VALUE lines, # comments. A card set up by an older build has the same file as
+ * hbxl-env: it is renamed once. */
+#define KAIHEN_SETTINGS KAIHEN_ROOT "/settings.env"
+
 static void load_settings(void) {
-    FILE *f = fopen(KAIHEN_ROOT "/hbxl-env", "r");
+    struct stat st;
+    if (stat(KAIHEN_SETTINGS, &st) != 0 && stat(KAIHEN_ROOT "/hbxl-env", &st) == 0)
+        rename(KAIHEN_ROOT "/hbxl-env", KAIHEN_SETTINGS);
+    FILE *f = fopen(KAIHEN_SETTINGS, "r");
     if (!f)
         return;
     char line[512];
@@ -195,7 +195,7 @@ static void power_check(void);
 static void power_close(void);
 void __libnx_exit(int rc) __attribute__((noreturn));
 
-/* --- sampling profiler (KAIHEN_PROFILE=1 in hbxl-env) ------------------------------------------ */
+/* --- sampling profiler (KAIHEN_PROFILE=1 in settings.env) -------------------------------------- */
 /* During races, about a thousand times a second, a thread on a core of its own pauses the game
  * thread for a moment and records the time, its pc and lr, and up to 8 callers from the frame-pointer
  * chain. They go to UserData/Logs/profile.bin at exit: a header {userAppInit's address (subtract the
@@ -439,23 +439,23 @@ static void watchdog(void *arg) {
     quit_now("no frame to return from");
 }
 
-/* CPU cores, as HBLauncher's runtime placed them (hbxl_pin_next_thread, its sdk/linux/thread.c):
- * the game thread keeps a core of its own, the runtime pins a few workers to cores of their own (GX
- * and video 5, audio 3, aurora's GPU worker 4, HBLauncher's numbers, in which the game thread is on
- * core 1), and every other thread may run on any core that is neither. libnx alone starts every
+/* CPU cores: the game thread keeps a core of its own, the runtime pins a few workers to cores of
+ * their own (hbxl_pin_next_thread: GX and video 5, audio 3, aurora's GPU worker 4, in the runtime's
+ * numbering, where the game thread is on core 1), and every other thread may run on any core that
+ * is neither. libnx alone starts every
  * pthread at the lowest priority with the game thread's core as its home, so the workers waited
  * behind the game thread. */
 static Mutex g_cores_lock;
 static int g_game_core = -1, g_pin_core = -1;
 static u64 g_cores, g_pinned_cores;
 
-static int kaihen_core(int hblauncher_core) {
-    /* HBLauncher's game core (1) and this console's game core trade places. */
-    if (hblauncher_core == 1)
+static int kaihen_core(int runtime_core) {
+    /* The runtime's game core (1) and this console's game core trade places. */
+    if (runtime_core == 1)
         return g_game_core;
-    if (hblauncher_core == g_game_core)
+    if (runtime_core == g_game_core)
         return 1;
-    return hblauncher_core;
+    return runtime_core;
 }
 
 static void cores_start(void) {
@@ -532,8 +532,8 @@ void userAppInit(void) {
     load_settings();
     extra_clocks_set();
     sqlite_setup();
-    /* As HBLauncher's environment: SDL draws nothing itself (aurora presents through Dawn to the
-     * NWindow), so its offscreen video driver. hbxl-env wins. */
+    /* SDL draws nothing itself (aurora presents through Dawn to the NWindow), so its offscreen
+     * video driver. settings.env wins. */
     setenv("SDL_VIDEO_DRIVER", "offscreen", 0);
     if (chdir(KAIHEN_ROOT) != 0)
         fprintf(stderr, "[kaihen] no %s on the card (%d)\n", KAIHEN_ROOT, errno);
@@ -666,127 +666,9 @@ void *hbxl_sdk_memalign(size_t align, size_t size) {
 
 void hbxl_sdk_free(void *p) { free(p); }
 
-/* --- input: the controller, through libnx ------------------------------------------------ */
-/* Player 1 or handheld, as the HBLauncher SDK reported them: HBX_* bits, sticks -100..100 with +y
- * up, a small deadzone. SDL's hbx joystick driver turns this into a Switch Pro style gamepad. */
-
-static int32_t stick_axis(s32 value) {
-    int32_t v = (int32_t)((int64_t)value * 100 / 32767);
-    if (v > -8 && v < 8)
-        return 0;
-    return v > 100 ? 100 : v < -100 ? -100 : v;
-}
-
-void hbx_input_poll(const struct hbx_ctx *ctx, struct hbx_input_state *state) {
-    static PadState pad;
-    static int ready;
-    (void)ctx;
-    if (!ready) {
-        padInitializeDefault(&pad);
-        ready = 1;
-    }
-    padUpdate(&pad);
-    static const struct { u64 nx; uint32_t hbx; } map[] = {
-        {HidNpadButton_A, HBX_A},         {HidNpadButton_B, HBX_B},
-        {HidNpadButton_X, HBX_X},         {HidNpadButton_Y, HBX_Y},
-        {HidNpadButton_L, HBX_L},         {HidNpadButton_R, HBX_R},
-        {HidNpadButton_ZL, HBX_ZL},       {HidNpadButton_ZR, HBX_ZR},
-        {HidNpadButton_Plus, HBX_PLUS},   {HidNpadButton_Minus, HBX_MINUS},
-        {HidNpadButton_StickL, HBX_STICK_L}, {HidNpadButton_StickR, HBX_STICK_R},
-        {HidNpadButton_Up, HBX_UP},       {HidNpadButton_Down, HBX_DOWN},
-        {HidNpadButton_Left, HBX_LEFT},   {HidNpadButton_Right, HBX_RIGHT},
-    };
-    const u64 held = padGetButtons(&pad);
-    uint32_t buttons = 0;
-    for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
-        if (held & map[i].nx)
-            buttons |= map[i].hbx;
-    const HidAnalogStickState left = padGetStickPos(&pad, 0), right = padGetStickPos(&pad, 1);
-    state->pressed = buttons & ~state->previous;
-    state->released = state->previous & ~buttons;
-    state->previous = buttons;
-    state->buttons = buttons;
-    state->stick_lx = stick_axis(left.x);
-    state->stick_ly = stick_axis(left.y);
-    state->stick_rx = stick_axis(right.x);
-    state->stick_ry = stick_axis(right.y);
-    state->connected = padIsConnected(&pad) ? 1 : 0;
-    state->touch_count = 0;
-}
-
-/* --- audio: audout, behind the AudioOut table SDL's hbx driver calls ------------------------- */
-/* The driver keeps the "object" and descriptors in its own memory; here a descriptor is a libnx
- * AudioOutBuffer (40 of its 64 bytes) and the object is unused: there is one AudioOut. */
-
-_Static_assert(sizeof(AudioOutBuffer) <= 0x40, "AudioOutBuffer fits a descriptor");
-
-static void audio_initialize_parameter(void *parameter) { (void)parameter; }
-
-static int32_t audio_open(void *object, const void *parameter) {
-    (void)object, (void)parameter;
-    const Result rc = audoutInitialize();
-    if (R_FAILED(rc))
-        fprintf(stderr, "[kaihen] audout: %x\n", rc);
-    return R_SUCCEEDED(rc) ? 0 : -1;
-}
-
-static int32_t audio_sample_rate(void *object) { (void)object; return (int32_t)audoutGetSampleRate(); }
-static int32_t audio_channel_count(void *object) { (void)object; return (int32_t)audoutGetChannelCount(); }
-static int32_t audio_sample_format(void *object) { (void)object; return (int32_t)audoutGetPcmFormat(); }
-
-static void audio_set_buffer_info(void *descriptor, const void *pcm, uint64_t capacity, uint64_t size) {
-    AudioOutBuffer *buffer = descriptor;
-    memset(buffer, 0, sizeof *buffer);
-    buffer->buffer = (void *)pcm;
-    buffer->buffer_size = capacity;
-    buffer->data_size = size;
-}
-
-static int32_t audio_append(void *object, void *descriptor) {
-    (void)object;
-    return R_SUCCEEDED(audoutAppendAudioOutBuffer(descriptor)) ? 1 : 0;
-}
-
-static int32_t audio_start(void *object) { (void)object; return R_SUCCEEDED(audoutStartAudioOut()) ? 0 : -1; }
-static int32_t audio_stop(void *object) { (void)object; return R_SUCCEEDED(audoutStopAudioOut()) ? 0 : -1; }
-static int32_t audio_nothing(void *object) { (void)object; return 0; }
-
-static void *audio_released(void *object) {
-    (void)object;
-    AudioOutBuffer *released = NULL;
-    u32 count = 0;
-    if (R_FAILED(audoutGetReleasedAudioOutBuffer(&released, &count)) || count == 0)
-        return NULL;
-    return released;
-}
-
-static int32_t audio_close(void *object) {
-    (void)object;
-    audoutExit();
-    return 0;
-}
-
-__attribute__((constructor)) static void fill_audio_table(void) {
-    g_ctx.audio = (struct hbx_audio){
-        .initialize_parameter = (uintptr_t)audio_initialize_parameter,
-        .open_default_audio_out = (uintptr_t)audio_open,
-        .sample_rate = (uintptr_t)audio_sample_rate,
-        .channel_count = (uintptr_t)audio_channel_count,
-        .sample_format = (uintptr_t)audio_sample_format,
-        .set_buffer_info = (uintptr_t)audio_set_buffer_info,
-        .append_buffer = (uintptr_t)audio_append,
-        .start = (uintptr_t)audio_start,
-        .stop = (uintptr_t)audio_stop,
-        .buffer_count = (uintptr_t)audio_nothing,
-        .flush_buffers = (uintptr_t)audio_nothing,
-        .released_buffer = (uintptr_t)audio_released,
-        .close = (uintptr_t)audio_close,
-    };
-}
-
 /* --- clocks -------------------------------------------------------------------------------- */
 /* All three are chosen in the port menu (settings_overlay.cpp, through kaihen_clock_*) and kept in
- * hbxl-env: KAIHEN_CPU_MHZ, KAIHEN_MEMORY_MHZ, KAIHEN_GPU_MHZ, each a rate in MHz, "max" (the top
+ * settings.env: KAIHEN_CPU_MHZ, KAIHEN_MEMORY_MHZ, KAIHEN_GPU_MHZ, each a rate in MHz, "max" (the top
  * of what the system offers) or 0 (the system's own rate). Defaults: the CPU at its stock maximum
  * (1702.4 MHz, applied by the runtime's CPU boost at launch), memory and GPU at the system's.
  *
@@ -1002,9 +884,9 @@ static void extra_clocks_restore(void) {
     mutexUnlock(&g_clock_lock);
 }
 
-/* hbxl-env with one KEY=VALUE line set: an existing line (commented out or not) is replaced. */
+/* settings.env with one KEY=VALUE line set: an existing line (commented out or not) is replaced. */
 static void save_setting(const char *key, const char *value) {
-    FILE *f = fopen(KAIHEN_ROOT "/hbxl-env", "r");
+    FILE *f = fopen(KAIHEN_SETTINGS, "r");
     char *text = NULL;
     size_t size = 0;
     FILE *out = open_memstream(&text, &size);
@@ -1033,7 +915,7 @@ static void save_setting(const char *key, const char *value) {
     if (!written)
         fprintf(out, "%s=%s\n", key, value);
     fclose(out);
-    f = fopen(KAIHEN_ROOT "/hbxl-env", "w");
+    f = fopen(KAIHEN_SETTINGS, "w");
     if (f) {
         fwrite(text, 1, size, f);
         fclose(f);

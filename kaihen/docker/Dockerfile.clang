@@ -1,10 +1,10 @@
-# The kaiHEN build with Clang (kaihen/run.sh, KAIHEN_COMPILER=clang): the HBLauncher build image
-# (Ubuntu, Clang 22, llvm-profdata for the shipped PGO profiles) with the Switch 2 devkit copied in
+# The kaiHEN build with Clang (kaihen/run.sh): the tools image (kaihen/docker/Dockerfile.tools:
+# Ubuntu, Clang 22, .NET) with the Switch 2 devkit copied in
 # from its own image. Clang compiles; the devkit's GCC links, with newlib, libounce and OunceVK.
-#   docker build -f kaihen/docker/Dockerfile.clang --build-arg HBX_IMAGE=wiicompiled-hbx-build:<tag> \
+#   docker build -f kaihen/docker/Dockerfile.clang --build-arg TOOLS_IMAGE=<the tools image> \
 #     -t ounce-devkit-clang kaihen/docker
-ARG HBX_IMAGE
+ARG TOOLS_IMAGE
 FROM ounce-devkit AS devkit
-FROM ${HBX_IMAGE}
+FROM ${TOOLS_IMAGE}
 COPY --from=devkit /opt/devkitpro /opt/devkitpro
 ENV DEVKITPRO=/opt/devkitpro DEVKITARM=/opt/devkitpro/devkitARM PATH=/opt/devkitpro/tools/bin:$PATH

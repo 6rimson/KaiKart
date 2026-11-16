@@ -420,12 +420,12 @@ list(REMOVE_ITEM SOURCES ${MKW_BASE_PRODUCT_SOURCE} ${MKW_RETRO_REWIND_PRODUCT_S
      ${MKW_CPU_BASELINE_SOURCE} ${MKW_PLATFORM_SOURCE})
 
 if(MKW_KAIHEN)
-    # What HBLauncher's runtime gave the game, on libnx (startup, screen, Vulkan, CPU clock).
+    # The kaiHEN platform layer: startup, screen, Vulkan, clocks, threads, the return to hbmenu.
     set(MKW_KAIHEN_PLATFORM_SOURCE "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/kaihen_platform.c")
     list(APPEND SOURCES "${MKW_KAIHEN_PLATFORM_SOURCE}")
     FetchContent_GetProperties(sqlite3 SOURCE_DIR MKW_KAIHEN_SQLITE_DIR)  # aurora's SQLite, for sqlite3.h
     set_source_files_properties("${MKW_KAIHEN_PLATFORM_SOURCE}" PROPERTIES
-        INCLUDE_DIRECTORIES "${HBX_SDK_INCLUDE};${MKW_KAIHEN_SQLITE_DIR}"
+        INCLUDE_DIRECTORIES "${MKW_KAIHEN_SQLITE_DIR}"
         SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
     # No Steam on the console: its input-layout helper (it spawns a process) is a no-op here.
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/steam_input_layout.cpp")

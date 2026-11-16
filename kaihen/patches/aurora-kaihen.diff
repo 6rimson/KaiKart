@@ -1,6 +1,69 @@
---- a/include/dolphin/gx/GXGeometry.h
-+++ b/include/dolphin/gx/GXGeometry.h
-@@ -35,9 +35,11 @@
+diff --git aurora-orig/cmake/AuroraDawnProvider.cmake aurora/cmake/AuroraDawnProvider.cmake
+index 3a57584..139ee84 100644
+--- aurora-orig/cmake/AuroraDawnProvider.cmake
++++ aurora/cmake/AuroraDawnProvider.cmake
+@@ -133,7 +133,7 @@ if (_aurora_dawn_provider STREQUAL "vendor")
+     set(DAWN_SUPPORTS_GLFW_FOR_WINDOWING OFF CACHE INTERNAL "Disable Dawn GLFW windowing")
+     set(DAWN_FETCH_DEPENDENCIES ON CACHE INTERNAL
+       "Use fetch_dawn_dependencies.py as an alternative to using depot_tools")
+-    if (CMAKE_SYSTEM_NAME STREQUAL Linux)
++    if (CMAKE_SYSTEM_NAME STREQUAL Linux AND NOT HBX_SWITCH2)
+       set(DAWN_USE_WAYLAND ON CACHE INTERNAL "Enable support for Wayland surface")
+     endif ()
+     set(TINT_BUILD_TESTS OFF CACHE INTERNAL "Build tests")
+diff --git aurora-orig/cmake/AuroraNodProvider.cmake aurora/cmake/AuroraNodProvider.cmake
+index 3bcbbdf..7f14398 100644
+--- aurora-orig/cmake/AuroraNodProvider.cmake
++++ aurora/cmake/AuroraNodProvider.cmake
+@@ -38,7 +38,16 @@ if (_aurora_nod_provider STREQUAL "auto")
+   message(STATUS "aurora: nod auto-resolved provider: ${_aurora_nod_provider}")
+ endif ()
+ 
+-if (_aurora_nod_provider STREQUAL "vendor")
++if (_aurora_nod_provider STREQUAL "hbx")
++  # HBLauncher Switch 2: nod-lite (plain GameCube ISO reader) instead of the
++  # Rust nod library.  AURORA_NOD_LITE_DIR holds nod_lite.c and nod.h.
++  if (NOT TARGET nod::nod)
++    add_library(nod_lite STATIC "${AURORA_NOD_LITE_DIR}/nod_lite.c")
++    target_include_directories(nod_lite PUBLIC "${AURORA_NOD_LITE_DIR}")
++    target_link_libraries(nod_lite PUBLIC Threads::Threads)
++    add_library(nod::nod ALIAS nod_lite)
++  endif ()
++elseif (_aurora_nod_provider STREQUAL "vendor")
+   # ── Vendor: FetchContent + Corrosion build from source ──
+   if (NOT TARGET nod::nod)
+     message(STATUS "aurora: Building nod (provider=vendor, linkage=${AURORA_NOD_LINKAGE})")
+diff --git aurora-orig/cmake/aurora_thp.cmake aurora/cmake/aurora_thp.cmake
+index 9abdecc..3860016 100644
+--- aurora-orig/cmake/aurora_thp.cmake
++++ aurora/cmake/aurora_thp.cmake
+@@ -1 +1,7 @@
+ add_subdirectory(lib/dolphin/thp)
++
++# Movies decode every frame on menus. -O3 lets the compiler vectorise the IDCT, and
++# fp-contract=off keeps the decoder's float arithmetic exactly as written.
++if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
++  target_compile_options(aurora_thp PRIVATE -O3 -ffp-contract=off)
++endif ()
+diff --git aurora-orig/include/aurora/gfx.h aurora/include/aurora/gfx.h
+index 8422b2a..434b3a7 100644
+--- aurora-orig/include/aurora/gfx.h
++++ aurora/include/aurora/gfx.h
+@@ -47,6 +47,9 @@ typedef struct {
+ const AuroraStats* aurora_get_stats();
+ float aurora_get_fps();
+ void aurora_get_present_timing(AuroraPresentTiming* timing);
++// While true (a race), new shaders and pipeline records stay in memory instead of being written to
++// storage, which can make the game's own file reads wait; they are written once it is false again.
++void aurora_set_cache_writes_deferred(bool deferred);
+ 
+ // Interpolation health: the per-frame fields describe the last frame, the counters accumulate
+ // since it was configured.
+diff --git aurora-orig/include/dolphin/gx/GXGeometry.h aurora/include/dolphin/gx/GXGeometry.h
+index 6f90958..7bf477a 100644
+--- aurora-orig/include/dolphin/gx/GXGeometry.h
++++ aurora/include/dolphin/gx/GXGeometry.h
+@@ -35,9 +35,11 @@ void GXEnableTexOffsets(GXTexCoordID coord, GXBool line_enable, GXBool point_ena
  #ifdef TARGET_PC
  void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride, bool le);
  #ifdef __cplusplus
@@ -12,9 +75,45 @@
  #endif
  #define GXSETARRAY(attr, data, size, stride, le) GXSetArray((attr), (data), (size), (stride), (le))
  #else
---- a/lib/aurora.cpp
-+++ b/lib/aurora.cpp
-@@ -569,7 +569,14 @@
+diff --git aurora-orig/include/dolphin/thp.h aurora/include/dolphin/thp.h
+index 1041b4c..1910780 100644
+--- aurora-orig/include/dolphin/thp.h
++++ aurora/include/dolphin/thp.h
+@@ -9,6 +9,9 @@ extern "C" {
+ 
+ BOOL THPInit(void);
+ s32 THPVideoDecode(const void* file, void* tileY, void* tileU, void* tileV, void* work /* unused */);
++// aurora extension: the frame's luma dimensions, read from its headers. A host caller decoding
++// straight into guest RAM needs them to report which bytes it wrote.
++BOOL THPVideoFrameSize(const void* file, u16* width, u16* height);
+ u32 THPAudioDecode(s16* audioBuffer, const u8* audioFrame, s32 flag);
+ 
+ #ifdef __cplusplus
+diff --git aurora-orig/lib/aurora.cpp aurora/lib/aurora.cpp
+index d08aa8d..c3bfe2f 100644
+--- aurora-orig/lib/aurora.cpp
++++ aurora/lib/aurora.cpp
+@@ -526,10 +526,18 @@ void end_frame_gx(imgui::DrawData imguiDrawData) noexcept {
+ #endif
+ 
+   const auto schedule = gfx::presentation::present_schedule();
++#if defined(HBX_SWITCH2)
++  const uint32_t hbxFrame = gfx::current_frame();
++  const bool hbxCapture = gfx::hbx_capture_frame(hbxFrame);
++#endif
+   const bool black = video::is_black();
+   const float brightness = video::brightness();
+   const bool metalfxEnabled = g_metalfxRequested.load();
+-  gfx::end_frame([black, brightness, metalfxEnabled, rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport, presentSource,
++  gfx::end_frame([
++#if defined(HBX_SWITCH2)
++                  hbxFrame, hbxCapture,
++#endif
++                  black, brightness, metalfxEnabled, rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport, presentSource,
+                   displayCopy = std::move(displayCopy), schedule,
+                   imguiDrawData = std::move(imguiDrawData)](
+                      wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks,
+@@ -561,7 +569,14 @@ void end_frame_gx(imgui::DrawData imguiDrawData) noexcept {
            surfaceWaitNanos = gfx::presentation::now_nanos() - acquireStart;
            surfaceStatus = surfaceTexture.status;
  
@@ -29,20 +128,2095 @@
              currentTexture = std::move(surfaceTexture.texture);
              currentView = currentTexture.CreateView();
            }
---- a/lib/dolphin/pad/pad.cpp
-+++ b/lib/dolphin/pad/pad.cpp
-@@ -146,9 +146,14 @@
-     {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_B},
-     {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_X},
-     {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_Y},
+@@ -655,12 +670,26 @@ void end_frame_gx(imgui::DrawData imguiDrawData) noexcept {
+       if (finalPresent) {
+         webgpu::gpu_prof::frame_end(encoder);
+       }
++#if defined(HBX_SWITCH2)
++      wgpu::Buffer hbxCaptureBuffer;
++      if (hbxCapture && finalPresent && presentSource.texture) {
++        hbxCaptureBuffer = gfx::hbx_capture_encode(encoder, presentSource.texture, presentSource.size);
++      }
++#endif
+       const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
+       const auto buffer = encoder.Finish(&cmdBufDescriptor);
+       {
+         ZoneScopedN("Queue Submit");
+         g_queue.Submit(1, &buffer);
+       }
++#if defined(HBX_SWITCH2)
++      if (hbxCaptureBuffer) {
++        gfx::hbx_capture_finish(hbxCaptureBuffer, presentSource.size, hbxFrame);
++      }
++      if (finalPresent) {
++        gfx::hbx_verify_process();
++      }
++#endif
+ 
+       if (g_metalfxPendingOutput) {
+         if (!g_metalfxPendingOutput->end_output()) metalfx_failed(g_metalfxPendingOutput->error());
+@@ -802,6 +831,18 @@ AuroraInfo aurora_initialize(int argc, char* argv[], const AuroraConfig* config)
+ 
+ void aurora_shutdown() { aurora::shutdown(); }
+ 
++#if defined(HBX_SWITCH2)
++// For returning to the launcher, which shares this process: frees everything on the GPU and leaves
++// the window, input and audio services alone, since the launcher still uses the console's.
++extern "C" void aurora_hbx_release_gpu() {
++  aurora::gx::fifo::shutdown();
++  aurora::gfx::render_worker::synchronize();
++  aurora::imgui::shutdown();
++  aurora::gfx::shutdown();
++  aurora::webgpu::shutdown();
++}
++#endif
++
+ const AuroraEvent* aurora_update() { return aurora::update(); }
+ 
+ bool aurora_begin_frame() { return aurora::begin_frame(); }
+diff --git aurora-orig/lib/dawn/BackendBinding.cpp aurora/lib/dawn/BackendBinding.cpp
+index 447ead8..3af6f49 100644
+--- aurora-orig/lib/dawn/BackendBinding.cpp
++++ aurora/lib/dawn/BackendBinding.cpp
+@@ -8,6 +8,10 @@
+ #include <SDL3/SDL_video.h>
+ #endif
+ 
++#if defined(HBX_SWITCH2)
++extern "C" void* hbx_switch2_vi_window(void);
++#endif
++
+ namespace aurora::webgpu {
+ namespace utils {
+ 
+@@ -16,6 +20,13 @@ std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptorCocoa(SDL
+ std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptor(SDL_Window* window) {
+ #if defined(SDL_PLATFORM_MACOS) || defined(SDL_PLATFORM_IOS) || defined(SDL_PLATFORM_TVOS)
+   return SetupWindowAndGetSurfaceDescriptorCocoa(window);
++#elif defined(HBX_SWITCH2)
++  // HBLauncher Switch 2: present to the console's vi window (handed over by
++  // the launcher for exclusive apps) through Dawn's Switch surface path.
++  (void)window;
++  std::shared_ptr<wgpu::SurfaceSourceSwitchNWindow> desc = std::make_shared<wgpu::SurfaceSourceSwitchNWindow>();
++  desc->window = hbx_switch2_vi_window();
++  return std::move(desc);
+ #else
+   const auto props = SDL_GetWindowProperties(window);
+ #if defined(SDL_PLATFORM_ANDROID)
+diff --git aurora-orig/lib/dolphin/gx/GXFrameBuffer.cpp aurora/lib/dolphin/gx/GXFrameBuffer.cpp
+index fcbefaf..890f5c0 100644
+--- aurora-orig/lib/dolphin/gx/GXFrameBuffer.cpp
++++ aurora/lib/dolphin/gx/GXFrameBuffer.cpp
+@@ -13,6 +13,7 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <cstring>
++#include <set>
+ #include <unordered_map>
+ 
+ namespace {
+@@ -159,6 +160,20 @@ void copy_tex(const void* dest, GXBool clear, u32 copyControl) noexcept {
+   const auto rect = map_logical_scissor(g_gxState.texCopySrc);
+   const auto [dstWidth, dstHeight] = scale_copy_dst(g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight);
+   const auto texCopyFmt = g_gxState.texCopyFmt;
++#if defined(HBX_SWITCH2)
++  // Lists each kind of EFB copy once: lightmaps, shadows and post effects all arrive here.
++  {
++    static const aurora::Module Log("aurora::gx::copy");
++    static std::set<u64> s_copyKinds;
++    const u64 kind = (static_cast<u64>(texCopyFmt) << 40) | (static_cast<u64>(g_gxState.texCopyDstWidth) << 20) |
++                     g_gxState.texCopyDstHeight;
++    if (s_copyKinds.insert(kind).second && s_copyKinds.size() < 64) {
++      Log.info("EFB copy: format {} {}x{} from {}x{}+{}+{} clear {}", static_cast<int>(texCopyFmt),
++               g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight, g_gxState.texCopySrc.width,
++               g_gxState.texCopySrc.height, g_gxState.texCopySrc.x, g_gxState.texCopySrc.y, static_cast<int>(clear));
++    }
++  }
++#endif
+   const auto copy = texture::resolve_copy_texture({
+       .dest = dest,
+       .width = dstWidth,
+diff --git aurora-orig/lib/dolphin/pad/pad.cpp aurora/lib/dolphin/pad/pad.cpp
+index 2e9e3a9..11cac02 100644
+--- aurora-orig/lib/dolphin/pad/pad.cpp
++++ aurora/lib/dolphin/pad/pad.cpp
+@@ -140,11 +140,27 @@ std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsNSOGamecube{{
+ }};
+ 
+ std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsProCon{{
++#if defined(HBX_SWITCH2)
++    // SDL buttons are positions, so the Switch's A (right) is east and B (bottom) is south.
++    {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_A},
++    {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_B},
++    {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_X},
++    {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_Y},
 +#if defined(MKW_KAIHEN)
 +    // kaiHEN: nothing runs behind the app, so pause is on Plus.
 +    {SDL_GAMEPAD_BUTTON_START, PAD_BUTTON_START},
 +#else
-     // SmileBASIC, still running behind the app, stops its program on Plus, and that program is the
-     // launcher's link to the PC. Pause lives on Minus, which SmileBASIC ignores.
-     {SDL_GAMEPAD_BUTTON_BACK, PAD_BUTTON_START},
++    // SmileBASIC, still running behind the app, stops its program on Plus, and that program is the
++    // launcher's link to the PC. Pause lives on Minus, which SmileBASIC ignores.
++    {SDL_GAMEPAD_BUTTON_BACK, PAD_BUTTON_START},
 +#endif
- #else
++#else
      {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_A},
      {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_B},
+     {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_X},
+     {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_Y},
+     {SDL_GAMEPAD_BUTTON_START, PAD_BUTTON_START},
++#endif
+     {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PAD_TRIGGER_Z},
+     {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_L},
+     {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_R},
+diff --git aurora-orig/lib/dolphin/thp/THPDec.cpp aurora/lib/dolphin/thp/THPDec.cpp
+index 0a94e1c..4ab26ac 100644
+--- aurora-orig/lib/dolphin/thp/THPDec.cpp
++++ aurora/lib/dolphin/thp/THPDec.cpp
+@@ -608,6 +608,23 @@ s32 aurora_thp_decode_video(const void* file, size_t size, void* tileY, void* ti
+   return 0;
+ }
+ 
++BOOL THPVideoFrameSize(const void* file, u16* width, u16* height) {
++  if (file == nullptr) {
++    return FALSE;
++  }
++  DecodeContext context{};
++  if (parse_headers(file, std::numeric_limits<size_t>::max(), context) != 0) {
++    return FALSE;
++  }
++  if (width != nullptr) {
++    *width = context.width;
++  }
++  if (height != nullptr) {
++    *height = context.height;
++  }
++  return TRUE;
++}
++
+ s32 THPVideoDecode(const void* file, void* tileY, void* tileU, void* tileV, void*) {
+   return aurora_thp_decode_video(file, std::numeric_limits<size_t>::max(), tileY, tileU, tileV, 0, 0);
+ }
+diff --git aurora-orig/lib/gfx/encoding.cpp aurora/lib/gfx/encoding.cpp
+index bc295e2..ec490fc 100644
+--- aurora-orig/lib/gfx/encoding.cpp
++++ aurora/lib/gfx/encoding.cpp
+@@ -1,5 +1,18 @@
+ #include "encoding.hpp"
+ 
++#if defined(HBX_SWITCH2)
++#include <algorithm>
++#include <array>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <mutex>
++#include <unordered_map>
++#include <vector>
++
++extern "C" uint64_t dawn_hbx_last_image[3];
++#endif
++
+ #include "frame.hpp"
+ #include "depth_peek.hpp"
+ 
+@@ -351,6 +364,107 @@ constexpr uint64_t TextureUploadStagingOffset = StorageStagingOffset + StorageBu
+ 
+ constexpr uint32_t align_down_copy_offset(uint32_t value) noexcept { return value & ~3u; }
+ 
++#if defined(HBX_SWITCH2)
++// AURORA_HBX_PROBE=1: follows one uploaded texture row per frame through the pipeline. It reads the
++// row from the staging buffer as the GPU sees it, from the texture right after the copy, and from
++// the texture again after the frame, which shows where an empty texture loses its data.
++struct HbxProbe {
++  wgpu::Buffer source;
++  wgpu::Buffer dest;
++  wgpu::Texture texture;
++  std::array<uint8_t, 256> expected{};
++  uint32_t bytes = 0;
++  uint32_t row = 0;
++  uint32_t width = 0;
++  uint32_t height = 0;
++  bool cleaned = false;
++  std::array<uint64_t, 3> image{};
++};
++
++std::mutex s_hbxImagesMutex;
++std::unordered_map<WGPUTexture, std::array<uint64_t, 3>> s_hbxImages;
++std::map<std::array<uint64_t, 3>, std::array<uint64_t, 2>> s_hbxBlocks;
++
++std::vector<HbxProbe> s_hbxProbes;
++uint64_t s_hbxProbeLastFrame = UINT64_MAX;
++uint32_t s_hbxProbeTotal = 0;
++uint64_t s_hbxProbeCounts[2][8]{};
++
++bool hbx_probe_enabled() noexcept {
++  static const bool enabled = std::getenv("AURORA_HBX_PROBE") != nullptr;
++  return enabled;
++}
++
++wgpu::Buffer hbx_probe_buffer() {
++  const wgpu::BufferDescriptor descriptor{.label = "HBX upload probe",
++                                          .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
++                                          .size = 256};
++  return webgpu::g_device.CreateBuffer(&descriptor);
++}
++
++bool hbx_probe_matches(const wgpu::Buffer& buffer, const HbxProbe& probe) {
++  bool ok = false;
++  const auto future = buffer.MapAsync(wgpu::MapMode::Read, 0, 256, wgpu::CallbackMode::WaitAnyOnly,
++                                      [&ok](wgpu::MapAsyncStatus status, wgpu::StringView) {
++                                        ok = status == wgpu::MapAsyncStatus::Success;
++                                      });
++  if (webgpu::g_instance.WaitAny(future, 5000000000) != wgpu::WaitStatus::Success || !ok) {
++    return false;
++  }
++  const bool same = std::memcmp(buffer.GetConstMappedRange(0, 256), probe.expected.data(), probe.bytes) == 0;
++  buffer.Unmap();
++  return same;
++}
++
++void hbx_probe_copy_row(wgpu::CommandEncoder& cmd, const HbxProbe& probe, const wgpu::Buffer& target) {
++  const wgpu::TexelCopyTextureInfo source{.texture = probe.texture, .origin = {.x = 0, .y = probe.row, .z = 0}};
++  const wgpu::TexelCopyBufferInfo destination{.layout = {.bytesPerRow = 256, .rowsPerImage = 1}, .buffer = target};
++  const wgpu::Extent3D extent{probe.bytes / 4, 1, 1};
++  cmd.CopyTextureToBuffer(&source, &destination, &extent);
++}
++
++void hbx_probe_upload(wgpu::CommandEncoder& cmd, FramePacket& frame, const TextureUpload& item, uint64_t stagingOffset) {
++  if (!hbx_probe_enabled() || item.buffer || item.tex.mipLevel != 0 || frame.frameId == s_hbxProbeLastFrame ||
++      s_hbxProbeTotal >= 1500 || item.tex.texture.GetFormat() != wgpu::TextureFormat::RGBA8Unorm) {
++    return;
++  }
++  const uint32_t bytesPerRow = item.layout.bytesPerRow;
++  const uint32_t rows = item.size.height;
++  const uint32_t alignedRow = AURORA_ALIGN(bytesPerRow, 256);
++  const uint32_t bytes = std::min<uint32_t>(bytesPerRow, 256) & ~3u;
++  const uint8_t* cpu = frame.textureUpload.data() + item.layout.offset;
++  for (const uint32_t row : {rows / 2, rows / 4, rows * 3 / 4, 0u, rows - 1}) {
++    const uint8_t* line = cpu + uint64_t{row} * alignedRow;
++    if (bytes == 0 || std::all_of(line, line + bytes, [](uint8_t value) { return value == 0; })) {
++      continue;
++    }
++    static const char* clean = std::getenv("AURORA_HBX_CACHE_CLEAN");
++    HbxProbe probe{.source = hbx_probe_buffer(),
++                   .dest = hbx_probe_buffer(),
++                   .texture = item.tex.texture,
++                   .bytes = bytes,
++                   .row = row,
++                   .width = item.size.width,
++                   .height = rows,
++                   .cleaned = clean != nullptr && (clean[0] != '2' || (frame.frameId & 1) != 0)};
++    std::memcpy(probe.expected.data(), line, bytes);
++    {
++      std::lock_guard lock{s_hbxImagesMutex};
++      if (const auto it = s_hbxImages.find(item.tex.texture.Get()); it != s_hbxImages.end()) {
++        probe.image = it->second;
++      }
++    }
++    cmd.CopyBufferToBuffer(staging_buffer(frame.stagingBuffer), stagingOffset + uint64_t{row} * alignedRow, probe.source,
++                           0, bytes);
++    hbx_probe_copy_row(cmd, probe, probe.dest);
++    s_hbxProbes.push_back(std::move(probe));
++    s_hbxProbeLastFrame = frame.frameId;
++    ++s_hbxProbeTotal;
++    return;
++  }
++}
++#endif
++
+ void copy_staging_buffer_range(wgpu::CommandEncoder& cmd, const FramePacket& frame, uint32_t& copied,
+                                uint32_t highWater, uint64_t stagingOffset, const wgpu::Buffer& dst) {
+   if (highWater <= copied) {
+@@ -402,6 +516,9 @@ void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& frame, c
+           .buffer = item.buffer ? item.buffer : staging_buffer(frame.stagingBuffer),
+       };
+       cmd.CopyBufferToTexture(&buf, &item.tex, &item.size);
++#if defined(HBX_SWITCH2)
++      hbx_probe_upload(cmd, frame, item, buf.layout.offset);
++#endif
+     }
+     frame.copied.textureUpload = highWater.textureUpload;
+     frame.copied.textureUploadCount = op.textureUploads.size();
+@@ -409,6 +526,45 @@ void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& frame, c
+ }
+ } // namespace
+ 
++#if defined(HBX_SWITCH2)
++void hbx_note_image(WGPUTexture texture) noexcept {
++  std::lock_guard lock{s_hbxImagesMutex};
++  s_hbxImages[texture] = {dawn_hbx_last_image[0], dawn_hbx_last_image[1], dawn_hbx_last_image[2]};
++}
++
++void hbx_probe_finish() noexcept {
++  for (auto& probe : s_hbxProbes) {
++    const bool source = hbx_probe_matches(probe.source, probe);
++    const bool dest = hbx_probe_matches(probe.dest, probe);
++    auto later = hbx_probe_buffer();
++    auto encoder = webgpu::g_device.CreateCommandEncoder();
++    hbx_probe_copy_row(encoder, probe, later);
++    const auto commands = encoder.Finish();
++    webgpu::g_queue.Submit(1, &commands);
++    const bool after = hbx_probe_matches(later, probe);
++    uint64_t& count = s_hbxProbeCounts[probe.cleaned ? 1 : 0][(source ? 4 : 0) | (dest ? 2 : 0) | (after ? 1 : 0)];
++    ++count;
++    ++s_hbxBlocks[{probe.image[0], probe.image[1] >> 23, probe.image[2]}][dest ? 0 : 1];
++    if (count <= 8) {
++      Log.warn("upload probe: {}x{} row {} staging {} after copy {} later {} cache clean {}", probe.width, probe.height,
++               probe.row, source ? "ok" : "BAD", dest ? "ok" : "BAD", after ? "ok" : "BAD", probe.cleaned);
++    }
++  }
++  if (!s_hbxProbes.empty() && s_hbxProbeTotal % 128 == 0) {
++    for (int cleaned = 0; cleaned < 2; ++cleaned) {
++      const auto& c = s_hbxProbeCounts[cleaned];
++      Log.info("upload probe totals, cache clean {}: all ok {}, staging bad {}, copy bad {}, wiped later {}, other {}",
++               cleaned != 0, c[7], c[0] + c[1] + c[2] + c[3], c[4] + c[5], c[6], 0);
++    }
++    for (const auto& [block, counts] : s_hbxBlocks) {
++      Log.info("upload probe block: memory {:x} offset {} MiB type {}: ok {} bad {}", block[0], block[1] * 8, block[2],
++               counts[0], counts[1]);
++    }
++  }
++  s_hbxProbes.clear();
++}
++#endif
++
+ namespace detail {
+ // Copies everything the frame staged into the device buffers, independent of what the
+ // incrementally encoded native frame has copied so far.
+diff --git aurora-orig/lib/gfx/encoding.hpp aurora/lib/gfx/encoding.hpp
+index fd2830f..d307fd8 100644
+--- aurora-orig/lib/gfx/encoding.hpp
++++ aurora/lib/gfx/encoding.hpp
+@@ -3,6 +3,10 @@
+ #include "frame_packet.hpp"
+ 
+ namespace aurora::gfx {
++#if defined(HBX_SWITCH2)
++void hbx_probe_finish() noexcept;
++void hbx_note_image(WGPUTexture texture) noexcept;
++#endif
+ 
+ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass);
+ void bind_pipeline(const wgpu::RenderPipeline& pipeline, const wgpu::RenderPassEncoder& pass);
+diff --git aurora-orig/lib/gfx/frame.cpp aurora/lib/gfx/frame.cpp
+index 0014f08..ec89318 100644
+--- aurora-orig/lib/gfx/frame.cpp
++++ aurora/lib/gfx/frame.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include <condition_variable>
+ #include "../gx/frame_interpolation.hpp"
+ #include "encoding.hpp"
+@@ -35,6 +36,21 @@
+ #include <tracy/Tracy.hpp>
+ #include <magic_enum.hpp>
+ 
++#if defined(HBX_SWITCH2)
++#include <atomic>
++#include <chrono>
++// Read by the runtime's MKW_PERF_STATS report (microseconds and counts).
++std::atomic<uint64_t> aurora_hbx_gpu_wait_us{0};
++std::atomic<uint64_t> aurora_hbx_render_cb_us{0};
++std::atomic<uint64_t> aurora_hbx_gpu_done_us{0};
++std::atomic<uint64_t> aurora_hbx_gpu_done_count{0};
++static uint64_t aurora_hbx_now_us() {
++  return std::chrono::duration_cast<std::chrono::microseconds>(
++             std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++#endif
++
+ namespace aurora::gfx {
+ using namespace detail;
+ using webgpu::g_device;
+@@ -207,6 +223,12 @@ void enqueue_process_events() {
+ }
+ 
+ void wait_for_gpu_progress(std::chrono::nanoseconds sleepDuration) {
++#if defined(HBX_SWITCH2)
++  struct WaitTimer {
++    uint64_t start = aurora_hbx_now_us();
++    ~WaitTimer() { aurora_hbx_gpu_wait_us.fetch_add(aurora_hbx_now_us() - start, std::memory_order_relaxed); }
++  } waitTimer;
++#endif
+   uint64_t generation;
+   {
+     std::lock_guard lock{g_progressMutex};
+@@ -789,8 +811,38 @@ void end_frame(EndFrameCallback callback) {
+   render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, interpolationSlots,
+                                              callback = std::move(callback)]() mutable {
+     auto& packet = g_framePackets[frameSlot];
++#if defined(HBX_SWITCH2)
++    // AURORA_HBX_CACHE_CLEAN=1: push staged data out of the CPU caches by hand, for testing
++    // whether the GPU sees everything the CPU wrote.
++    static const char* hbxCacheClean = std::getenv("AURORA_HBX_CACHE_CLEAN");
++    if (hbxCacheClean != nullptr && (hbxCacheClean[0] != '2' || (packet.frameId & 1) != 0)) {
++      const auto clean = [](const ByteBuffer& buffer) {
++        const auto start = reinterpret_cast<uintptr_t>(buffer.data()) & ~uintptr_t{63};
++        const auto end = reinterpret_cast<uintptr_t>(buffer.data()) + buffer.size();
++        for (uintptr_t line = start; line < end; line += 64) {
++          __asm__ volatile("dc cvac, %0" : : "r"(line) : "memory");
++        }
++      };
++      clean(packet.verts);
++      clean(packet.uniforms);
++      clean(packet.indices);
++      clean(packet.storage);
++      clean(packet.textureUpload);
++      __asm__ volatile("dsb sy" : : : "memory");
++    }
++#endif
+     g_stagingBuffers[stagingSlot].Unmap();
+     g_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
++#if defined(HBX_SWITCH2)
++    // Every staged upload should have an encoded copy by now. One that doesn't stays empty.
++    if (packet.copied.textureUploadCount != packet.textureUploads.size()) {
++      static uint64_t lost = 0;
++      lost += packet.textureUploads.size() - packet.copied.textureUploadCount;
++      Log.warn("frame {}: {} of {} texture uploads never encoded, {} ops ({} lost so far)", packet.frameId,
++               packet.textureUploads.size() - packet.copied.textureUploadCount, packet.textureUploads.size(),
++               packet.ops.size(), lost);
++    }
++#endif
+     auto encoder = std::move(packet.encoder);
+     const auto stats = packet.stats;
+     auto afterSubmitCallbacks = std::move(packet.afterSubmitCallbacks);
+@@ -819,9 +871,25 @@ void end_frame(EndFrameCallback callback) {
+     g_resources.stats.lastStorageSize = stats.lastStorageSize;
+     g_resources.stats.lastTextureUploadSize = stats.lastTextureUploadSize;
+ 
++#if defined(HBX_SWITCH2)
++    const uint64_t renderStart = aurora_hbx_now_us();
++#endif
+     if (callback) {
+       callback(encoder, std::move(afterSubmitCallbacks), replay);
+     }
++#if defined(HBX_SWITCH2)
++    hbx_probe_finish();
++#endif
++#if defined(HBX_SWITCH2)
++    const uint64_t submitted = aurora_hbx_now_us();
++    aurora_hbx_render_cb_us.fetch_add(submitted - renderStart, std::memory_order_relaxed);
++    webgpu::g_queue.OnSubmittedWorkDone(wgpu::CallbackMode::AllowSpontaneous,
++                                        [submitted](wgpu::QueueWorkDoneStatus, wgpu::StringView) {
++                                          aurora_hbx_gpu_done_us.fetch_add(aurora_hbx_now_us() - submitted,
++                                                                           std::memory_order_relaxed);
++                                          aurora_hbx_gpu_done_count.fetch_add(1, std::memory_order_relaxed);
++                                        });
++#endif
+     packet = {};
+ 
+     g_frameSlots.release(frameSlot);
+diff --git aurora-orig/lib/gfx/pipeline_cache.cpp aurora/lib/gfx/pipeline_cache.cpp
+index e349eed..b030aea 100644
+--- aurora-orig/lib/gfx/pipeline_cache.cpp
++++ aurora/lib/gfx/pipeline_cache.cpp
+@@ -28,6 +28,16 @@
+ #include <type_traits>
+ #include <vector>
+ 
++#if defined(HBX_SWITCH2)
++#include <cstdlib>
++#include <cstring>
++#include <pthread.h>
++extern "C" void* hbxl_sdk_memalign(size_t align, size_t size);
++extern "C" void hbxl_sdk_free(void* p);
++// Read by the runtime's MKW_PERF_STATS report.
++std::atomic<uint64_t> aurora_hbx_skipped_draws{0};
++#endif
++
+ #include <SDL3/SDL_iostream.h>
+ #include <absl/container/flat_hash_map.h>
+ #include <absl/container/flat_hash_set.h>
+@@ -38,6 +48,12 @@ namespace aurora::gx {
+ void clear_shader_module_cache();
+ }
+ 
++namespace aurora::webgpu {
++void set_cache_stores_deferred(bool deferred);
++bool has_deferred_stores();
++void flush_deferred_stores();
++} // namespace aurora::webgpu
++
+ namespace aurora::gfx {
+ static Module Log("aurora::gfx::pipeline_cache");
+ 
+@@ -111,6 +127,9 @@ static std::condition_variable g_pipelineCacheWriterCv;
+ static std::mutex g_pipelineCacheWriterMutex;
+ static std::deque<PipelineCacheWrite> g_pipelineCacheWriteQueue;
+ static bool g_pipelineCacheWriterStop = false;
++// aurora_set_cache_writes_deferred: during races the writer holds new records, and the Dawn shader
++// cache keeps new shaders in memory, so nothing is written to storage then.
++static bool g_pipelineCacheWritesDeferred = false;
+ static int g_sdlVfsRegisterResult = SQLITE_ERROR;
+ 
+ static SdlVfsSqliteFile* sdl_vfs_file(sqlite3_file* file) { return reinterpret_cast<SdlVfsSqliteFile*>(file); }
+@@ -482,8 +501,60 @@ static void persist_known_pipeline_locked(HashType cacheKey) {
+       known.config);
+ }
+ 
++#if defined(HBX_SWITCH2)
++// HBLauncher (Switch 2): a pipeline the driver refused is stored empty, so its draws are skipped,
++// and retried after a growing delay, up to HbxPipelineAttempts times.
++struct HbxFailedPipeline {
++  uint32_t attempts = 0;
++  uint64_t retryFrame = 0;
++};
++static absl::flat_hash_map<PipelineRef, HbxFailedPipeline> g_hbxFailedPipelines;
++static uint64_t g_hbxFrame;
++static uint64_t g_hbxPipelineFailures;
++constexpr uint32_t HbxPipelineAttempts = 5;
++constexpr uint64_t HbxPipelineRetryFrames = 30;
++
++static void note_hbx_pipeline_result_locked(PipelineRef hash, bool compiled) {
++  const auto it = g_hbxFailedPipelines.find(hash);
++  if (compiled) {
++    if (it != g_hbxFailedPipelines.end()) {
++      Log.info("Pipeline {:x} built on attempt {}", hash, it->second.attempts + 1);
++      g_hbxFailedPipelines.erase(it);
++    }
++    return;
++  }
++  auto& failed = g_hbxFailedPipelines[hash];
++  ++failed.attempts;
++  ++g_hbxPipelineFailures;
++  failed.retryFrame = g_hbxFrame + HbxPipelineRetryFrames * failed.attempts;
++  if (failed.attempts < HbxPipelineAttempts) {
++    Log.warn("Pipeline {:x} failed (attempt {}, {} failures in total); its draws are skipped, retry in {} frames",
++             hash, failed.attempts, g_hbxPipelineFailures, HbxPipelineRetryFrames * failed.attempts);
++  } else {
++    Log.warn("Pipeline {:x} failed {} times; giving up, its draws stay skipped", hash, failed.attempts);
++  }
++}
++
++static void retry_hbx_failed_pipelines() {
++  std::lock_guard lock{g_pipelineMutex};
++  ++g_hbxFrame;
++  for (const auto& [hash, failed] : g_hbxFailedPipelines) {
++    if (failed.attempts >= HbxPipelineAttempts || failed.retryFrame > g_hbxFrame) {
++      continue;
++    }
++    // Dropping the empty entry makes the next draw that needs it queue a new build.
++    if (const auto it = g_pipelines.find(hash); it != g_pipelines.end() && !it->second.main) {
++      g_pipelines.erase(it);
++    }
++  }
++}
++#endif
++
+ static void store_pipeline_locked(PipelineRef hash, HashType cacheKey, CompiledPipeline&& pipeline) {
+   const bool compiled = static_cast<bool>(pipeline.main);
++#if defined(HBX_SWITCH2)
++  note_hbx_pipeline_result_locked(hash, compiled);
++#endif
+   g_pipelines.try_emplace(hash, std::move(pipeline));
+   if (compiled) {
+     persist_known_pipeline_locked(cacheKey);
+@@ -968,13 +1039,18 @@ static void pipeline_cache_writer() {
+     std::deque<PipelineCacheWrite> batch;
+     {
+       std::unique_lock lock{g_pipelineCacheWriterMutex};
+-      g_pipelineCacheWriterCv.wait(lock,
+-                                   [] { return g_pipelineCacheWriterStop || !g_pipelineCacheWriteQueue.empty(); });
++      g_pipelineCacheWriterCv.wait(lock, [] {
++        return g_pipelineCacheWriterStop ||
++               (!g_pipelineCacheWritesDeferred && (!g_pipelineCacheWriteQueue.empty() || webgpu::has_deferred_stores()));
++      });
+       if (g_pipelineCacheWriterStop && g_pipelineCacheWriteQueue.empty()) {
++        lock.unlock();
++        webgpu::flush_deferred_stores();
+         return;
+       }
+       batch.swap(g_pipelineCacheWriteQueue);
+     }
++    webgpu::flush_deferred_stores();
+ 
+     bool writeFailed = false;
+     {
+@@ -1041,6 +1117,60 @@ static void pipeline_worker() {
+   }
+ }
+ 
++#if defined(HBX_SWITCH2)
++// HBLauncher (Switch 2): pipeline creation failed with VK_ERROR_UNKNOWN on worker threads whose
++// stacks live in the runtime's Vulkan-backed memory, which system services cannot access. Workers
++// get SDK-heap stacks, and their number and stack placement can be set from the environment:
++//   AURORA_PIPELINE_THREADS  worker count, 0 = build on the frame thread (default 2)
++//   AURORA_PIPELINE_STACK    "sdk" (default) or "default" (the runtime's own thread stacks)
++struct HbxPipelineThread {
++  pthread_t thread;
++  void* stack;
++};
++static std::vector<HbxPipelineThread> g_hbxPipelineThreads;
++constexpr size_t HbxPipelineStackSize = 8u << 20;
++
++static void* hbx_pipeline_worker_entry(void*) {
++  pipeline_worker();
++  return nullptr;
++}
++
++static unsigned int start_hbx_pipeline_threads() {
++  const char* countEnv = std::getenv("AURORA_PIPELINE_THREADS");
++  const char* stackEnv = std::getenv("AURORA_PIPELINE_STACK");
++  const unsigned int count = countEnv != nullptr ? std::clamp(std::atoi(countEnv), 0, 4) : 2;
++  const bool sdkStack = stackEnv == nullptr || std::strcmp(stackEnv, "default") != 0;
++  unsigned int sdkStacks = 0;
++  for (unsigned int i = 0; i < count; ++i) {
++    pthread_attr_t attr;
++    pthread_attr_init(&attr);
++    void* stack = sdkStack ? hbxl_sdk_memalign(4096, HbxPipelineStackSize) : nullptr;
++    if (stack != nullptr) {
++      pthread_attr_setstack(&attr, stack, HbxPipelineStackSize);
++    }
++    pthread_t thread;
++    if (pthread_create(&thread, &attr, hbx_pipeline_worker_entry, nullptr) != 0) {
++      hbxl_sdk_free(stack);
++      pthread_attr_destroy(&attr);
++      break;
++    }
++    pthread_attr_destroy(&attr);
++    sdkStacks += stack != nullptr ? 1 : 0;
++    g_hbxPipelineThreads.push_back({thread, stack});
++  }
++  Log.info("Pipeline workers: {} ({} on SDK-heap stacks)", g_hbxPipelineThreads.size(), sdkStacks);
++  return static_cast<unsigned int>(g_hbxPipelineThreads.size());
++}
++
++static void join_hbx_pipeline_threads() {
++  for (auto& worker : g_hbxPipelineThreads) {
++    pthread_join(worker.thread, nullptr);
++    hbxl_sdk_free(worker.stack);
++  }
++  g_hbxPipelineThreads.clear();
++}
++#endif
++
+ template <typename PipelineConfig>
+ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersion) {
+   if (!prepare_pipeline_cache_db()) {
+@@ -1074,6 +1204,10 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
+     if (config.version != configVersion) {
+       continue;
+     }
++    if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {
++      // Saved before the fog type became a uniform: copies differing only in it are now one pipeline.
++      config.shaderConfig.fogType = gx::canonical_fog_type(config.shaderConfig.fogType);
++    }
+ 
+     remember_pipeline_config(type, config, firstFrameUsed, true);
+     ++acceptedRows;
+@@ -1191,16 +1325,24 @@ void initialize_pipeline_cache() {
+     g_hasPipelineThread = false;
+   } else {
+     g_hasPipelineThread = true;
++#if defined(HBX_SWITCH2)
++    if (start_hbx_pipeline_threads() == 0) {
++      g_hasPipelineThread = false;
++    }
++#else
+     const auto workerCount = std::clamp(std::thread::hardware_concurrency() / 2, 1u, 4u);
+ 
+     for (unsigned int i = 0; i < workerCount; ++i) {
+       g_pipelineThreads.emplace_back(pipeline_worker);
+     }
++#endif
+   }
+ 
+   const size_t loadedCount = load_pipeline_cache();
+   rebuild_pipeline_cache();
+-  if (!g_pipelineCacheBroken && loadedCount > 0) {
++  // Pruning stops the game for about 1.4 s over the file server and the cache grows slowly, so it
++  // only runs on request.
++  if (!g_pipelineCacheBroken && loadedCount > 0 && std::getenv("AURORA_GPU_CACHE_PRUNE") != nullptr) {
+     g_gpuCachePrunePending = true;
+   }
+ 
+@@ -1221,6 +1363,9 @@ void shutdown_pipeline_cache() {
+     for (auto& worker : g_pipelineThreads) {
+       worker.join();
+     }
++#if defined(HBX_SWITCH2)
++    join_hbx_pipeline_threads();
++#endif
+ 
+     g_pipelineThreads.clear();
+   }
+@@ -1245,6 +1390,9 @@ void shutdown_pipeline_cache() {
+ }
+ 
+ void begin_pipeline_frame() {
++#if defined(HBX_SWITCH2)
++  retry_hbx_failed_pipelines();
++#endif
+   if (!g_hasPipelineThread) {
+     g_pipelinesPerFrame = 0;
+   }
+@@ -1295,6 +1443,9 @@ bool get_pipeline(PipelineRef ref, CompiledPipeline& pipeline) {
+ 
+   const auto it = g_pipelines.find(ref);
+   if (it == g_pipelines.end() || !it->second.main) {
++#if defined(HBX_SWITCH2)
++    aurora_hbx_skipped_draws.fetch_add(1, std::memory_order_relaxed);
++#endif
+     return false;
+   }
+   pipeline = it->second;
+@@ -1302,3 +1453,16 @@ bool get_pipeline(PipelineRef ref, CompiledPipeline& pipeline) {
+ }
+ 
+ } // namespace aurora::gfx
++
++extern "C" void aurora_set_cache_writes_deferred(bool deferred) {
++  using namespace aurora;
++  {
++    std::lock_guard lock{gfx::g_pipelineCacheWriterMutex};
++    if (gfx::g_pipelineCacheWritesDeferred == deferred) {
++      return;
++    }
++    gfx::g_pipelineCacheWritesDeferred = deferred;
++    webgpu::set_cache_stores_deferred(deferred);
++  }
++  gfx::g_pipelineCacheWriterCv.notify_one();
++}
+diff --git aurora-orig/lib/gfx/recording.cpp aurora/lib/gfx/recording.cpp
+index 6981e05..871b81a 100644
+--- aurora-orig/lib/gfx/recording.cpp
++++ aurora/lib/gfx/recording.cpp
+@@ -21,6 +21,7 @@
+ #endif
+ #include "../window.hpp"
+ 
++#include <cstdlib>
+ #include <array>
+ #include <cstring>
+ #include <new>
+@@ -693,6 +694,15 @@ void queue_texture_upload(TextureUpload upload) {
+ 
+ void queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32_t rowsPerImage,
+                                wgpu::TexelCopyTextureInfo tex, wgpu::Extent3D size) {
++#if defined(HBX_SWITCH2)
++  // AURORA_HBX_DIRECT_UPLOAD=1: skip the staging buffer, to test that path on its own.
++  static const bool hbxDirect = std::getenv("AURORA_HBX_DIRECT_UPLOAD") != nullptr;
++  if (hbxDirect) {
++    const wgpu::TexelCopyBufferLayout directLayout{.bytesPerRow = bytesPerRow, .rowsPerImage = rowsPerImage};
++    webgpu::g_queue.WriteTexture(&tex, data, uint64_t{bytesPerRow} * rowsPerImage, &directLayout, &size);
++    return;
++  }
++#endif
+   const auto copyBytesPerRow = AURORA_ALIGN(bytesPerRow, 256);
+   auto& frame = current_frame_packet();
+   if (frame.textureUpload.size() + copyBytesPerRow * rowsPerImage <= TextureUploadSize) {
+diff --git aurora-orig/lib/gfx/render_worker.cpp aurora/lib/gfx/render_worker.cpp
+index 0cdb411..cda078b 100644
+--- aurora-orig/lib/gfx/render_worker.cpp
++++ aurora/lib/gfx/render_worker.cpp
+@@ -8,6 +8,10 @@
+ 
+ #include <tracy/Tracy.hpp>
+ 
++#if defined(HBX_SWITCH2)
++extern "C" void hbxl_pin_next_thread(int core) __attribute__((weak));
++#endif
++
+ namespace aurora::gfx::render_worker {
+ namespace {
+ constexpr size_t QueueCapacity = 256;
+@@ -197,6 +201,11 @@ void initialize() {
+   }
+   g_queue.reset();
+   g_pendingItems.store(0, std::memory_order_release);
++#if defined(HBX_SWITCH2)
++  if (hbxl_pin_next_thread != nullptr) {
++    hbxl_pin_next_thread(2);
++  }
++#endif
+   g_thread = thread::Thread{{
+                                 .name = "Aurora render worker",
+                                 .affinity = thread::Affinity::SharedCache,
+diff --git aurora-orig/lib/gfx/texture.cpp aurora/lib/gfx/texture.cpp
+index 029a3d0..593c514 100644
+--- aurora-orig/lib/gfx/texture.cpp
++++ aurora/lib/gfx/texture.cpp
+@@ -6,6 +6,7 @@
+ #include "aurora/aurora.h"
+ #include "texture.hpp"
+ #include "texture_convert.hpp"
++#include "encoding.hpp"
+ #include "../gx/gx_fmt.hpp"
+ 
+ #include <algorithm>
+@@ -13,6 +14,17 @@
+ #include <memory>
+ #include <utility>
+ 
++#if defined(HBX_SWITCH2)
++#include <atomic>
++#include <cstdlib>
++#include <cstring>
++#include <deque>
++#include <mutex>
++#include <vector>
++#define XXH_STATIC_LINKING_ONLY
++#include <xxhash.h>
++#endif
++
+ #include <fmt/format.h>
+ #include <tracy/Tracy.hpp>
+ #include <webgpu/webgpu_cpp.h>
+@@ -97,6 +109,196 @@ u16 wgpu_aniso(GXAnisotropy aniso) {
+ }
+ } // namespace
+ 
++#if defined(HBX_SWITCH2)
++namespace {
++struct HbxCheck {
++  TextureHandle strong;
++  std::weak_ptr<TextureRef> weak;
++  uint64_t hash = 0;
++  uint32_t bytesPerRow = 0;
++  uint32_t rows = 0;
++  wgpu::Extent3D size{};
++  uint32_t readyAt = 0;
++};
++
++std::mutex s_hbxCheckMutex;
++std::deque<HbxCheck> s_hbxPending;
++std::deque<HbxCheck> s_hbxRecheck;
++std::atomic<uint32_t> s_hbxFrames{0};
++uint64_t s_hbxChecked = 0;
++uint64_t s_hbxBad = 0;
++uint64_t s_hbxDropped = 0;
++
++bool hbx_verify_enabled() noexcept {
++  static const bool enabled = std::getenv("AURORA_HBX_VERIFY") != nullptr;
++  return enabled;
++}
++
++bool hbx_capture_enabled() noexcept {
++  static const bool enabled = std::getenv("AURORA_HBX_CAPTURE") != nullptr;
++  return enabled;
++}
++
++bool hbx_read_buffer(const wgpu::Buffer& buffer, uint64_t size) {
++  bool ok = false;
++  const auto future = buffer.MapAsync(wgpu::MapMode::Read, 0, size, wgpu::CallbackMode::WaitAnyOnly,
++                                      [&ok](wgpu::MapAsyncStatus status, wgpu::StringView) {
++                                        ok = status == wgpu::MapAsyncStatus::Success;
++                                      });
++  return webgpu::g_instance.WaitAny(future, 5000000000) == wgpu::WaitStatus::Success && ok;
++}
++
++void hbx_check_texture(HbxCheck& check, TextureRef& ref, bool first) {
++  const uint32_t alignedRow = AURORA_ALIGN(check.bytesPerRow, 256);
++  const uint64_t bytes = uint64_t{alignedRow} * check.rows;
++  const wgpu::BufferDescriptor descriptor{.label = "HBX texture check",
++                                          .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
++                                          .size = bytes};
++  auto buffer = webgpu::g_device.CreateBuffer(&descriptor);
++  auto encoder = webgpu::g_device.CreateCommandEncoder();
++  const wgpu::TexelCopyTextureInfo source{.texture = ref.texture};
++  const wgpu::TexelCopyBufferInfo target{.layout = {.bytesPerRow = alignedRow, .rowsPerImage = check.rows},
++                                         .buffer = buffer};
++  encoder.CopyTextureToBuffer(&source, &target, &check.size);
++  const auto commands = encoder.Finish();
++  webgpu::g_queue.Submit(1, &commands);
++  if (!hbx_read_buffer(buffer, bytes)) {
++    Log.warn("texture check: readback failed for {}x{}", ref.size.width, ref.size.height);
++    return;
++  }
++  const auto* mapped = static_cast<const uint8_t*>(buffer.GetConstMappedRange(0, bytes));
++  std::vector<uint8_t> tight(uint64_t{check.bytesPerRow} * check.rows);
++  for (uint32_t row = 0; row < check.rows; ++row) {
++    std::memcpy(tight.data() + uint64_t{row} * check.bytesPerRow, mapped + uint64_t{row} * alignedRow,
++                check.bytesPerRow);
++  }
++  ++s_hbxChecked;
++  if (XXH3_64bits(tight.data(), tight.size()) != check.hash) {
++    const auto zero = std::count(tight.begin(), tight.end(), uint8_t{0});
++    const uint64_t index = s_hbxBad++;
++    Log.warn("texture check {}: {}x{} gx format {} wgpu {} mips {}: GPU contents differ, {:.1f}% zero bytes ({})", index,
++             ref.size.width, ref.size.height, ref.gxFormat, static_cast<int>(ref.format), ref.mipCount,
++             100.0 * static_cast<double>(zero) / static_cast<double>(tight.size()), first ? "new" : "was correct before");
++    if (index < 24) {
++      const auto path = fmt::format("/UserData/Captures/bad_{:03}_{}x{}_gx{}_row{}.raw", index, ref.size.width,
++                                    ref.size.height, ref.gxFormat, check.bytesPerRow);
++      if (std::FILE* file = std::fopen(path.c_str(), "wb")) {
++        std::fwrite(tight.data(), 1, tight.size(), file);
++        std::fclose(file);
++      }
++    }
++  }
++  if ((s_hbxChecked & 255) == 0) {
++    Log.info("texture check: {} checked, {} differ, {} skipped", s_hbxChecked, s_hbxBad, s_hbxDropped);
++  }
++}
++
++void hbx_verify_enqueue(const TextureHandle& handle, const uint8_t* data, uint32_t bytesPerRow, uint32_t rows,
++                        wgpu::Extent3D size) {
++  if (!hbx_verify_enabled()) {
++    return;
++  }
++  const uint64_t hash = XXH3_64bits(data, uint64_t{bytesPerRow} * rows);
++  std::lock_guard lock{s_hbxCheckMutex};
++  if (s_hbxPending.size() >= 128) {
++    ++s_hbxDropped;
++    return;
++  }
++  s_hbxPending.push_back({.strong = handle,
++                          .hash = hash,
++                          .bytesPerRow = bytesPerRow,
++                          .rows = rows,
++                          .size = size,
++                          .readyAt = s_hbxFrames.load(std::memory_order_relaxed) + 3});
++}
++} // namespace
++
++void hbx_verify_process() noexcept {
++  if (!hbx_verify_enabled()) {
++    return;
++  }
++  const uint32_t frame = s_hbxFrames.fetch_add(1, std::memory_order_relaxed);
++  for (int i = 0; i < 4; ++i) {
++    HbxCheck check;
++    {
++      std::lock_guard lock{s_hbxCheckMutex};
++      if (s_hbxPending.empty() || static_cast<int32_t>(frame - s_hbxPending.front().readyAt) < 0) {
++        break;
++      }
++      check = std::move(s_hbxPending.front());
++      s_hbxPending.pop_front();
++    }
++    hbx_check_texture(check, *check.strong, true);
++    check.weak = check.strong;
++    check.strong = {};
++    std::lock_guard lock{s_hbxCheckMutex};
++    if (s_hbxRecheck.size() < 4096) {
++      s_hbxRecheck.push_back(std::move(check));
++    }
++  }
++  if ((frame % 30) == 0) {
++    for (int i = 0; i < 2; ++i) {
++      HbxCheck check;
++      {
++        std::lock_guard lock{s_hbxCheckMutex};
++        if (s_hbxRecheck.empty()) {
++          break;
++        }
++        check = std::move(s_hbxRecheck.front());
++        s_hbxRecheck.pop_front();
++      }
++      if (const auto ref = check.weak.lock()) {
++        hbx_check_texture(check, *ref, false);
++        std::lock_guard lock{s_hbxCheckMutex};
++        s_hbxRecheck.push_back(std::move(check));
++      }
++    }
++  }
++}
++
++bool hbx_capture_frame(uint32_t frame) noexcept { return hbx_capture_enabled() && frame % 300 == 150; }
++
++std::FILE* hbx_draw_file(uint32_t frame) noexcept {
++  static std::FILE* file = nullptr;
++  static uint32_t fileFrame = UINT32_MAX;
++  if (frame != fileFrame) {
++    if (file != nullptr) {
++      std::fclose(file);
++    }
++    fileFrame = frame;
++    file = std::fopen(fmt::format("/UserData/Captures/draws_{:06}.txt", frame).c_str(), "w");
++  }
++  return file;
++}
++
++wgpu::Buffer hbx_capture_encode(wgpu::CommandEncoder& encoder, const wgpu::Texture& texture, wgpu::Extent3D size) {
++  const uint32_t row = AURORA_ALIGN(size.width * 4, 256);
++  const wgpu::BufferDescriptor descriptor{.label = "HBX frame capture",
++                                          .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
++                                          .size = uint64_t{row} * size.height};
++  auto buffer = webgpu::g_device.CreateBuffer(&descriptor);
++  const wgpu::TexelCopyTextureInfo source{.texture = texture};
++  const wgpu::TexelCopyBufferInfo target{.layout = {.bytesPerRow = row, .rowsPerImage = size.height}, .buffer = buffer};
++  const wgpu::Extent3D extent{size.width, size.height, 1};
++  encoder.CopyTextureToBuffer(&source, &target, &extent);
++  return buffer;
++}
++
++void hbx_capture_finish(const wgpu::Buffer& buffer, wgpu::Extent3D size, uint32_t frame) noexcept {
++  const uint32_t row = AURORA_ALIGN(size.width * 4, 256);
++  const uint64_t bytes = uint64_t{row} * size.height;
++  if (!hbx_read_buffer(buffer, bytes)) {
++    return;
++  }
++  const auto path = fmt::format("/UserData/Captures/frame_{:06}_{}x{}_row{}.raw", frame, size.width, size.height, row);
++  if (std::FILE* file = std::fopen(path.c_str(), "wb")) {
++    std::fwrite(buffer.GetConstMappedRange(0, bytes), 1, bytes, file);
++    std::fclose(file);
++  }
++  buffer.Unmap();
++}
++#endif
++
+ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 format, ArrayRef<uint8_t> data,
+                                     bool tlut, const char* label) noexcept {
+   ZoneScoped;
+@@ -147,6 +349,11 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
+       };
+       g_queue.WriteTexture(&dstView, data.data() + offset, dataSize, &dataLayout, &physicalSize);
+     }
++#if defined(HBX_SWITCH2)
++    if (mip == 0) {
++      hbx_verify_enqueue(handle, data.data(), bytesPerRow, heightBlocks, physicalSize);
++    }
++#endif
+     offset += dataSize;
+   }
+   if (data.size() != UINT32_MAX && offset < data.size()) {
+@@ -166,7 +373,11 @@ TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t m
+   };
+   const wgpu::TextureDescriptor textureDescriptor{
+       .label = label,
++#if defined(HBX_SWITCH2)
++      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc,
++#else
+       .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
++#endif
+       .dimension = wgpu::TextureDimension::e2D,
+       .size = size,
+       .format = wgpuFormat,
+@@ -174,6 +385,9 @@ TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t m
+       .sampleCount = 1,
+   };
+   auto texture = g_device.CreateTexture(&textureDescriptor);
++#if defined(HBX_SWITCH2)
++  hbx_note_image(texture.Get());
++#endif
+   const auto viewLabel = fmt::format("{} view", label);
+   wgpu::TextureViewDescriptor textureViewDescriptor{
+       .label = viewLabel.c_str(),
+@@ -201,7 +415,12 @@ TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat,
+   };
+   const wgpu::TextureDescriptor textureDescriptor{
+       .label = label,
++#if defined(HBX_SWITCH2)
++      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::RenderAttachment |
++               wgpu::TextureUsage::CopySrc,
++#else
+       .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::RenderAttachment,
++#endif
+       .dimension = wgpu::TextureDimension::e2D,
+       .size = size,
+       .format = wgpuFormat,
+diff --git aurora-orig/lib/gfx/texture.hpp aurora/lib/gfx/texture.hpp
+index 6343702..5de88af 100644
+--- aurora-orig/lib/gfx/texture.hpp
++++ aurora/lib/gfx/texture.hpp
+@@ -1,4 +1,6 @@
+ #pragma once
++
++#include <cstdio>
+ #include <bit>
+ #include <dolphin/gx.h>
+ 
+@@ -56,6 +58,17 @@ struct TextureRef {
+   , gxFormat(gxFormat) {}
+ };
+ 
++#if defined(HBX_SWITCH2)
++// AURORA_HBX_VERIFY=1: reads uploaded textures back from the GPU and compares them with what was
++// sent, shortly after the upload and again later. Mismatches go to /UserData/Captures.
++void hbx_verify_process() noexcept;
++// AURORA_HBX_CAPTURE=1: every 300th frame, saves the screen and a list of its draws there too.
++bool hbx_capture_frame(uint32_t frame) noexcept;
++std::FILE* hbx_draw_file(uint32_t frame) noexcept;
++wgpu::Buffer hbx_capture_encode(wgpu::CommandEncoder& encoder, const wgpu::Texture& texture, wgpu::Extent3D size);
++void hbx_capture_finish(const wgpu::Buffer& buffer, wgpu::Extent3D size, uint32_t frame) noexcept;
++#endif
++
+ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
+                                     ArrayRef<uint8_t> data, bool tlut, const char* label) noexcept;
+ TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
+diff --git aurora-orig/lib/gx/command_processor.cpp aurora/lib/gx/command_processor.cpp
+index 136ffb6..0f17873 100644
+--- aurora-orig/lib/gx/command_processor.cpp
++++ aurora/lib/gx/command_processor.cpp
+@@ -14,6 +14,12 @@
+ 
+ #include <tracy/Tracy.hpp>
+ 
++#if defined(HBX_SWITCH2)
++#include <cstdio>
++#define XXH_STATIC_LINKING_ONLY
++#include <xxhash.h>
++#endif
++
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdint>
+@@ -597,6 +603,24 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+   } else if (interpolate && cache.interpRecorded && vertices != nullptr) {
+     extend_interpolation_draw(usage.mask);
+   }
++#if defined(HBX_SWITCH2)
++  if (gfx::hbx_capture_frame(gfx::current_frame())) {
++    if (std::FILE* file = gfx::hbx_draw_file(gfx::current_frame())) {
++      std::fprintf(file, "prim %d fmt %d verts %u pipe %llx uniform %u %llx", static_cast<int>(prim),
++                   static_cast<int>(fmt), static_cast<unsigned>(vtxCount),
++                   static_cast<unsigned long long>(xxh3_hash(cache.pipelineRef)), cache.uniformRange.size,
++                   static_cast<unsigned long long>(
++                       XXH3_64bits(gfx::uniform_data(cache.uniformRange), cache.uniformRange.size)));
++      for (u32 i = 0; i < MaxTextures; ++i) {
++        if (cache.shaderInfo.sampledTextures.test(i) && state.textures[i]) {
++          const auto& tex = state.textures[i];
++          std::fprintf(file, " t%u %ux%u gx%u", i, tex.ref->size.width, tex.ref->size.height, tex.ref->gxFormat);
++        }
++      }
++      std::fputc('\n', file);
++    }
++  }
++#endif
+   if (cache.config.shaderConfig.fogRangeEnabled) {
+     const auto key = fog_range_lut_key();
+     if (!cache.hasFogRange || cache.fogRangeKey != key) {
+diff --git aurora-orig/lib/gx/fifo.cpp aurora/lib/gx/fifo.cpp
+index afe6328..d3294b1 100644
+--- aurora-orig/lib/gx/fifo.cpp
++++ aurora/lib/gx/fifo.cpp
+@@ -6,12 +6,22 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <chrono>
+ #include <cstring>
+ #include <limits>
+ #include <mutex>
+ 
+ #include <tracy/Tracy.hpp>
+ 
++#if defined(HBX_SWITCH2)
++extern "C" void hbxl_pin_next_thread(int core) __attribute__((weak));
++#endif
++
++#if defined(HBX_SWITCH2)
++std::atomic<uint64_t> aurora_hbx_drain_us{0};
++std::atomic<uint64_t> aurora_hbx_drain_count{0};
++#endif
++
+ namespace aurora::gx::fifo {
+ namespace detail {
+ uint8_t* sBufferData = nullptr;
+@@ -87,8 +97,14 @@ void process_to(uint64_t target, std::memory_order order) noexcept {
+     }
+     processed += result.bytesProcessed;
+     sProcessed.store(processed, order);
++#if !defined(HBX_SWITCH2)
+     sProcessed.notify_all();
++#endif
+   }
++#if defined(HBX_SWITCH2)
++  // Once per batch: a wake-up per command costs more than the commands do here.
++  sProcessed.notify_all();
++#endif
+ }
+ 
+ void worker_main(std::stop_token token) noexcept {
+@@ -105,6 +121,18 @@ void worker_main(std::stop_token token) noexcept {
+     if (token.stop_requested()) {
+       break;
+     }
++#if defined(HBX_SWITCH2)
++    // This thread has its own core. Polling briefly means a producer's publish finds nobody
++    // asleep and makes no kernel call, which saves hundreds of wake-ups per frame.
++    bool hbxWork = false;
++    for (int spin = 0; spin < 4096 && !hbxWork; ++spin) {
++      __asm__ volatile("yield");
++      hbxWork = sPublished.load(std::memory_order_acquire) != processed;
++    }
++    if (hbxWork) {
++      continue;
++    }
++#endif
+     sWorkerWake.wait(event, std::memory_order_acquire);
+   }
+ }
+@@ -113,6 +141,11 @@ void start_worker() {
+   if (kProcessingMode != ProcessingMode::Thread || sWorkerThread.joinable()) {
+     return;
+   }
++#if defined(HBX_SWITCH2)
++  if (hbxl_pin_next_thread != nullptr) {
++    hbxl_pin_next_thread(4);
++  }
++#endif
+   sWorkerThread = thread::Thread{{
+                                      .name = "Aurora FIFO processor",
+                                      .affinity = thread::Affinity::SharedCache,
+@@ -276,12 +309,27 @@ void drain() {
+     wake_worker();
+ 
+     uint64_t processed = sProcessed.load(std::memory_order_acquire);
++#if defined(HBX_SWITCH2)
++    // The game thread and this worker have cores of their own, so polling is cheaper than sleeping.
++    const auto hbxDrainStart = std::chrono::steady_clock::now();
++    for (int spin = 0; spin < 400000 && processed < target; ++spin) {
++      __asm__ volatile("yield");
++      processed = sProcessed.load(std::memory_order_acquire);
++    }
++#endif
+     if (processed < target) {
+       do {
+         sProcessed.wait(processed, std::memory_order_acquire);
+         processed = sProcessed.load(std::memory_order_acquire);
+       } while (processed < target);
+     }
++#if defined(HBX_SWITCH2)
++    aurora_hbx_drain_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(
++                                      std::chrono::steady_clock::now() - hbxDrainStart)
++                                      .count(),
++                                  std::memory_order_relaxed);
++    aurora_hbx_drain_count.fetch_add(1, std::memory_order_relaxed);
++#endif
+     break;
+   }
+   }
+diff --git aurora-orig/lib/gx/gx.cpp aurora/lib/gx/gx.cpp
+index e373bf0..6c7b082 100644
+--- aurora-orig/lib/gx/gx.cpp
++++ aurora/lib/gx/gx.cpp
+@@ -27,6 +27,13 @@
+ 
+ static aurora::Module Log("aurora::gx");
+ 
++#if defined(HBX_SWITCH2)
++#include <memory>
++#include <string>
++extern "C" void* hbxl_sdk_memalign(size_t align, size_t size);
++extern "C" void hbxl_sdk_free(void* p);
++#endif
++
+ namespace aurora::gx {
+ using webgpu::g_device;
+ using webgpu::g_graphicsConfig;
+@@ -462,6 +469,43 @@ void set_render_scissor(const gfx::ClipRect& scissor) noexcept {
+ 
+ const gfx::TextureBind& get_texture(GXTexMapID id) noexcept { return g_gxState.textures[static_cast<size_t>(id)]; }
+ 
++#if defined(HBX_SWITCH2)
++// HBLauncher (Switch 2): the console's driver sometimes refuses a pipeline (VK_ERROR_UNKNOWN, a
++// different one every run). Catch that here instead of letting the uncaptured-error callback end
++// the game; the pipeline cache skips the pipeline's draws and retries it later.
++static bool pop_hbx_scope(std::string& error) {
++  auto message = std::make_shared<std::string>();
++  auto future = g_device.PopErrorScope(
++      wgpu::CallbackMode::WaitAnyOnly,
++      [message](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView text) {
++        if (status != wgpu::PopErrorScopeStatus::Success || type != wgpu::ErrorType::NoError) {
++          const std::string_view detail{text};
++          *message = detail.empty() ? "pipeline creation failed" : std::string(detail);
++        }
++      });
++  if (webgpu::g_instance.WaitAny(future, 5000000000) != wgpu::WaitStatus::Success) {
++    error = "timed out checking pipeline creation";
++    return false;
++  }
++  if (!message->empty()) {
++    error = *message;
++    return false;
++  }
++  return true;
++}
++
++// The largest free block in the SDK heap (which the driver allocates from), to the nearest power of two.
++static uint32_t hbx_sdk_heap_free_mib() {
++  for (uint32_t mib = 128; mib >= 1; mib /= 2) {
++    if (void* p = hbxl_sdk_memalign(4096, size_t{mib} << 20)) {
++      hbxl_sdk_free(p);
++      return mib;
++    }
++  }
++  return 0;
++}
++#endif
++
+ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, const gfx::RenderTargetLayout& layout,
+                                     const PipelineOptions& options, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
+                                     wgpu::ShaderModule shader, const char* label) noexcept {
+@@ -512,7 +556,21 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, const gfx::Ren
+       .multisample = wgpu::MultisampleState{.count = layout.sampleCount},
+       .fragment = &fragmentState,
+   };
++#if defined(HBX_SWITCH2)
++  g_device.PushErrorScope(wgpu::ErrorFilter::OutOfMemory);
++  g_device.PushErrorScope(wgpu::ErrorFilter::Internal);
++  auto pipeline = g_device.CreateRenderPipeline(&descriptor);
++  std::string error;
++  const bool internalOk = pop_hbx_scope(error);
++  const bool memoryOk = pop_hbx_scope(error);
++  if (!internalOk || !memoryOk) {
++    Log.warn("{} failed: {} (largest free SDK heap block: {} MiB)", label, error, hbx_sdk_heap_free_mib());
++    return {};
++  }
++  return pipeline;
++#else
+   return g_device.CreateRenderPipeline(&descriptor);
++#endif
+ }
+ 
+ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept {
+@@ -522,7 +580,9 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+   config.shaderConfig = {};
+ 	config.shaderConfig.forceAlphaOne = !g_gxState.colorUpdate && g_gxState.alphaUpdate &&
+ 		g_gxState.dstAlpha != UINT32_MAX && g_gxState.dstAlpha != 0;
+-  config.shaderConfig.fogType = g_gxState.fog.type;
++  // Only whether there is fog: its formula (linear, exponential...; perspective or orthographic) is a
++  // uniform read by the shader, so a fog change never needs a new pipeline (shader.cpp).
++  config.shaderConfig.fogType = canonical_fog_type(g_gxState.fog.type);
+ 	config.shaderConfig.zTextureOp = g_gxState.zTextureOp;
+ 	if (g_gxState.zTextureOp != GX_ZT_DISABLE) {
+ 		config.shaderConfig.zTextureFormat = g_gxState.zTextureFormat;
+@@ -693,6 +753,18 @@ GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
+     } else {
+       textureEntry.textureView = sEmptyTextureView.Get();
+       samplerEntry.sampler = sEmptySampler.Get();
++#if defined(HBX_SWITCH2)
++      // A shader that samples an empty slot reads zero: on the console this looks like black art
++      // or a video with no colour. Logged at each power of two, so it can't flood the log.
++      if (info.sampledTextures[i] || info.sampledIndTextures[i]) {
++        static std::atomic<uint64_t> s_emptySlots{0};
++        const uint64_t count = s_emptySlots.fetch_add(1, std::memory_order_relaxed) + 1;
++        if ((count & (count - 1)) == 0) {
++          Log.warn("sampled texture slot {} is empty ({} times so far; sampled {:08b})", i, count,
++                   info.sampledTextures.to_ulong());
++        }
++      }
++#endif
+     }
+   }
+   const WGPUBindGroupDescriptor textureBindGroupDescriptor{
+diff --git aurora-orig/lib/gx/pipeline.hpp aurora/lib/gx/pipeline.hpp
+index e05f211..2090af3 100644
+--- aurora-orig/lib/gx/pipeline.hpp
++++ aurora/lib/gx/pipeline.hpp
+@@ -19,6 +19,12 @@ struct DrawData {
+   uint32_t dstAlpha;
+ };
+ 
++// The pipeline key's fog type: GX_FOG_NONE or GX_FOG_PERSP_LIN for any fog. The actual type is
++// in the fog uniform. Saved configs from before are folded the same way when loaded.
++constexpr u8 canonical_fog_type(uint32_t type) noexcept {
++  return type == GX_FOG_NONE ? static_cast<u8>(GX_FOG_NONE) : static_cast<u8>(GX_FOG_PERSP_LIN);
++}
++
+ constexpr uint32_t GXPipelineConfigVersion = 14;
+ struct PipelineConfig {
+   uint32_t version = GXPipelineConfigVersion;
+diff --git aurora-orig/lib/gx/shader.cpp aurora/lib/gx/shader.cpp
+index 893d6a3..3863585 100644
+--- aurora-orig/lib/gx/shader.cpp
++++ aurora/lib/gx/shader.cpp
+@@ -10,6 +10,7 @@
+ #include <dolphin/gx/GXEnum.h>
+ 
+ #include <absl/container/flat_hash_set.h>
++#include <cstdlib>
+ #include <mutex>
+ #include <string_view>
+ #include <utility>
+@@ -887,6 +888,10 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
+   std::string_view intMax = alpha ? "255"sv : "vec3i(255)"sv;
+   std::string_view shift7 = alpha ? "7u"sv : "vec3u(7u)"sv;
+   std::string_view shift8 = alpha ? "8u"sv : "vec3u(8u)"sv;
++  // NVIDIA's driver follows the spec on NaN and Inf: normalize(0) is NaN and converting one to an
++  // integer gives a large negative value, which clamps a lit surface to black. Integer lighting
++  // goes through these, so a bad term contributes nothing instead.
++  std::string_view toInt = alpha ? "hbx_light1"sv : "hbx_light3"sv;
+   std::string outVar = fmt::format("out.cc{}", i);
+   std::string_view posVar = "mv_pos"sv;
+   std::string_view nrmVar = "mv_nrm"sv;
+@@ -908,9 +913,9 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
+   if (!cc.lightingEnabled) {
+     // The XF lighting block consumes and produces 8-bit channel values even when lighting is disabled.
+     if (alpha) {
+-      return fmt::format("\n    {0}.a = f32(i32(round({1}.a * 255.0))) / 255.0;", outVar, matSrc);
++      return fmt::format("\n    {0}.a = f32(hbx_light1({1}.a * 255.0)) / 255.0;", outVar, matSrc);
+     }
+-    return fmt::format("\n    {0} = vec4f(vec3f(vec3i(round({1}.rgb * 255.0))) / 255.0, 1.0);", outVar, matSrc);
++    return fmt::format("\n    {0} = vec4f(vec3f(hbx_light3({1}.rgb * 255.0)) / 255.0, 1.0);", outVar, matSrc);
+   }
+ 
+   GXDiffuseFn diffFn = cc.diffFn;
+@@ -925,7 +930,7 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
+           var dist_attn = dot(light.dist_att, vec3f(1.0, dist, dist2));
+           attn = max(0.0, cos_attn / dist_attn);)""");
+   } else if (cc.attnFn == GX_AF_SPEC) {
+-    std::string dist_attn = diffFn != GX_DF_NONE ? "dot(normalize(light.dist_att), vec3f(1.0, attn, attn * attn))"
++    std::string dist_attn = diffFn != GX_DF_NONE ? "dot(hbx_norm(light.dist_att), vec3f(1.0, attn, attn * attn))"
+                                                  : "dot(light.dist_att, vec3f(1.0, attn, attn * attn))";
+     // A zero distance term saturates rather than dividing by zero.
+     lightAttnFn = fmt::format(R"""(
+@@ -949,7 +954,7 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
+           var ldir = light.pos - {0};
+           var dist2 = dot(ldir, ldir);
+           var dist = sqrt(dist2);
+-          ldir = ldir / dist;)""",
++          ldir = select(vec3f(0.0), ldir / max(dist, 1e-20), dist > 0.0);)""",
+                                 posVar);
+   }
+ 
+@@ -970,20 +975,20 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
+             : fmt::format("vec4f(vec3f((material * (lacc + (lacc >> {}))) >> {}) / 255.0, 1.0)", shift7, shift8);
+   return fmt::format(R"""(
+     {{
+-      var lighting = {8}(round({4}{6} * 255.0));
++      var lighting = {14}({4}{6} * 255.0);
+       for (var i = 0u; i < {1}u; i++) {{
+           if ((ubuf.lightState{0}{7} & (1u << i)) == 0u) {{ continue; }}
+           var light = ubuf.lights[i];{5}
+           var attn: f32;{2}
+           var diff = {3};
+-          lighting = lighting + {8}(round(attn * diff * light.color{6} * 255.0));
++          lighting = lighting + {14}(attn * diff * light.color{6} * 255.0);
+       }}
+       let lacc = clamp(lighting, {9}, {10});
+-      let material = {8}(round({11}{6} * 255.0));
++      let material = {14}({11}{6} * 255.0);
+       {12} = {13};
+     }})""",
+                      i, GX::MaxLights, lightAttnFn, lightDiffFn, ambSrc, lightDirSetup, swizzle,
+-                     alpha ? "a"sv : ""sv, intType, intZero, intMax, matSrc, outputTarget, outputValue);
++                     alpha ? "a"sv : ""sv, intType, intZero, intMax, matSrc, outputTarget, outputValue, toInt);
+ }
+ 
+ absl::flat_hash_set<gfx::ShaderRef> s_seenShaders;
+@@ -1366,7 +1371,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+       // Emboss bump: offset the source texcoord by the light projected onto tangent/binormal
+       const u32 lightIdx = tcg.type - GX_TG_BUMP0;
+       vtxXfrAttrs += fmt::format(
+-          "\n    let bump_ldir{0} = normalize(ubuf.lights[{1}].pos - mv_pos);"
++          "\n    let bump_ldir{0} = hbx_norm(ubuf.lights[{1}].pos - mv_pos);"
+           "\n    let bump_tan{0} = vec4f(in_tangent, 0.0) * ubuf.nrm_mtx[in_pnmtxidx];"
+           "\n    let bump_bin{0} = vec4f(in_binrm, 0.0) * ubuf.nrm_mtx[in_pnmtxidx];"
+           "\n    out.tex{0}_uv = tc{2}_proj.xy + vec2f(dot(bump_ldir{0}, bump_tan{0}), dot(bump_ldir{0}, "
+@@ -1419,7 +1424,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+     }
+ 
+     if (tcg.normalize) {
+-      vtxXfrAttrs += fmt::format("\n    tc{0}_tmp = normalize(tc{0}_tmp);", i);
++      vtxXfrAttrs += fmt::format("\n    tc{0}_tmp = hbx_norm(tc{0}_tmp);", i);
+     }
+ 
+     if (tcg.postMtx == GX_PTIDENTITY) {
+@@ -1675,7 +1680,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         fragmentFnPre += fmt::format("\n    t_TexCoord = {};", finalCoord);
+       }
+       // Coordinates wrap at 24 bits
+-      fragmentFnPre += "\n    t_TexCoord = (t_TexCoord << vec2u(8u)) >> vec2u(8u);";
++      fragmentFnPre += "\n    t_TexCoord = tev_s24_fixed_vec2i(t_TexCoord);";
+ 
+       if (needsTextureSample && hasBaseTexture) {
+         fragmentFnPre += fmt::format("\n    var ind{0}_uv = vec2f(t_TexCoord) / (ubuf.tex{1}_size_bias.xy * 128.0);",
+@@ -1750,48 +1755,31 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         "}";
+     uniBufAttrs += "\n    fog: Fog,";
+ 
+-    if ((config.fogType & 0x08) != 0) {
+-      fragmentFn += fmt::format("\n    // Orthographic fog\n    var fogBase = ubuf.fog.a * {};", fogDepth);
+-    } else {
+-      fragmentFn +=
+-          fmt::format("\n    // Perspective fog\n    var fogBase = ubuf.fog.a / (ubuf.fog.b - {});", fogDepth);
+-    }
++    // The fog type is a uniform (the colour's alpha) rather than part of the pipeline, so a game that
++    // changes fog types mid-scene doesn't build a new pipeline for each type (gx.cpp).
++    fragmentFn += fmt::format(
++        "\n    // Fog, of the type in fog.color.a: bit 3 orthographic, low bits the curve"
++        "\n    let fogType = u32(ubuf.fog.color.a + 0.5);"
++        "\n    var fogBase = ubuf.fog.a / (ubuf.fog.b - {0});"
++        "\n    if ((fogType & 8u) != 0u) {{"
++        "\n        fogBase = ubuf.fog.a * {0};"
++        "\n    }}",
++        fogDepth);
+ 
+     if (config.fogRangeEnabled) {
+       fragmentFn += "\n        fogBase *= bitcast<f32>(abuf[imm.fog_range_base + u32(in.pos.x)]);";
+     }
+ 
+-    fragmentFn += "\n    var fogF = clamp(fogBase - ubuf.fog.c, 0.0, 1.0);";
+-
+-    switch (config.fogType) {
+-      DEFAULT_FATAL("invalid fog type {}", config.fogType);
+-    case static_cast<GXFogType>(1):
+-    case static_cast<GXFogType>(3):
+-    case GX_FOG_PERSP_LIN:
+-    case static_cast<GXFogType>(9):
+-    case static_cast<GXFogType>(11):
+-    case GX_FOG_ORTHO_LIN:
+-      fragmentFn += "\n    var fogZ = fogF;";
+-      break;
+-    case GX_FOG_PERSP_EXP:
+-    case GX_FOG_ORTHO_EXP:
+-      fragmentFn += "\n    var fogZ = 1.0 - exp2(-8.0 * fogF);";
+-      break;
+-    case GX_FOG_PERSP_EXP2:
+-    case GX_FOG_ORTHO_EXP2:
+-      fragmentFn += "\n    var fogZ = 1.0 - exp2(-8.0 * fogF * fogF);";
+-      break;
+-    case GX_FOG_PERSP_REVEXP:
+-    case GX_FOG_ORTHO_REVEXP:
+-      fragmentFn += "\n    var fogZ = exp2(-8.0 * (1.0 - fogF));";
+-      break;
+-    case GX_FOG_PERSP_REVEXP2:
+-    case GX_FOG_ORTHO_REVEXP2:
+-      fragmentFn +=
+-          "\n    fogF = 1.0 - fogF;"
+-          "\n    var fogZ = exp2(-8.0 * fogF * fogF);";
+-      break;
+-    }
++    fragmentFn +=
++        "\n    var fogF = clamp(fogBase - ubuf.fog.c, 0.0, 1.0);"
++        "\n    var fogZ = fogF;"
++        "\n    switch (fogType & 7u) {"
++        "\n        case 4u: { fogZ = 1.0 - exp2(-8.0 * fogF); }"
++        "\n        case 5u: { fogZ = 1.0 - exp2(-8.0 * fogF * fogF); }"
++        "\n        case 6u: { fogZ = exp2(-8.0 * (1.0 - fogF)); }"
++        "\n        case 7u: { let fogR = 1.0 - fogF; fogZ = exp2(-8.0 * fogR * fogR); }"
++        "\n        default: { }"
++        "\n    }";
+ 
+     fragmentFn += "\n    prev = vec4f(mix(prev.rgb, ubuf.fog.color.rgb, clamp(fogZ, 0.0, 1.0)), prev.a);";
+   }
+@@ -1877,6 +1865,27 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+   std::string fragmentOutput;
+   std::string_view fragmentOutputType = "@location(0) vec4f"sv;
+   std::string fragmentReturn = "\n    return prev;"s;
++#if defined(HBX_SWITCH2)
++  // AURORA_HBX_DEBUG_TEXTURE=1, 2 or 3: draw that surface's first, second or third sampled texture
++  // directly, bypassing TEV. =rast: draw its lit vertex colour instead. These split "sampling
++  // returns black" from "lighting or TEV combines it wrongly".
++  if (const char* view = std::getenv("AURORA_HBX_DEBUG_TEXTURE"); view != nullptr) {
++    if (view[0] == 'r') {
++      if (fragmentFnPre.find("var rast0") != std::string::npos) {
++        fragmentFn += "\n    prev = vec4f(rast0.rgb, 1.0);";
++      }
++    } else {
++      auto at = fragmentFnPre.find("var sampled");
++      for (int n = view[0] - '1'; n > 0 && at != std::string::npos; --n) {
++        at = fragmentFnPre.find("var sampled", at + 1);
++      }
++      if (at != std::string::npos) {
++        const auto id = fragmentFnPre.substr(at + 11, fragmentFnPre.find(' ', at + 11) - (at + 11));
++        fragmentFn += fmt::format("\n    prev = vec4f(sampled{}.rgb, 1.0);", id);
++      }
++    }
++  }
++#endif
+   if (normalAttachment != UINT32_MAX) {
+     fragmentOutput = fmt::format(
+         "\nstruct FragmentOutput {{\n"
+@@ -1940,6 +1949,20 @@ fn bswap16(v: u32, le: bool) -> u32 {{
+   return select(((v & 0xFFu) << 8u) | (v >> 8u), v, le);
+ }}
+ 
++fn hbx_light1(v: f32) -> i32 {{
++  let finite = (bitcast<u32>(v) & 0x7f800000u) != 0x7f800000u;
++  return i32(round(clamp(select(0.0, v, finite), -65536.0, 65536.0)));
++}}
++
++fn hbx_light3(v: vec3f) -> vec3i {{
++  return vec3i(hbx_light1(v.x), hbx_light1(v.y), hbx_light1(v.z));
++}}
++
++fn hbx_norm(v: vec3f) -> vec3f {{
++  let len2 = dot(v, v);
++  return select(vec3f(0.0), v / sqrt(len2), len2 > 1e-20);
++}}
++
+ fn load_word(p: ptr<storage, array<u32>>, word_idx: u32) -> u32 {{
+   // This guard is not expected to handle routine out-of-bounds accesses.
+   // It appears to discourage some Adreno drivers/optimizers from storage buffer
+@@ -2260,6 +2283,11 @@ fn tev_overflow_vec3f(in: vec3f) -> vec3f {{
+   return (byte_space - floor(byte_space / 256.0) * 256.0) / 255.0;
+ }}
+ 
++fn tev_s24_fixed_vec2i(in: vec2i) -> vec2i {{
++  let low = in & vec2i(0x00FFFFFF);
++  return select(low, low - vec2i(0x01000000), low >= vec2i(0x00800000));
++}}
++
+ fn tev_overflow_vec4f(in: vec4f) -> vec4f {{
+   let byte_space = in * 255.0;
+   return (byte_space - floor(byte_space / 256.0) * 256.0) / 255.0;
+diff --git aurora-orig/lib/gx/shader_info.cpp aurora/lib/gx/shader_info.cpp
+index f5df625..a74874b 100644
+--- aurora-orig/lib/gx/shader_info.cpp
++++ aurora/lib/gx/shader_info.cpp
+@@ -507,7 +507,7 @@ static void fill_uniform(ByteBuffer& buf, const ShaderInfo& info) noexcept {
+     const float logicalWidth = std::max(g_gxState.logicalViewport.width, 1.f);
+     const float renderWidth = std::max(g_gxState.renderViewport.width, 1.f);
+     Fog fog{
+-        .color = state.color,
++        .color = {state.color[0], state.color[1], state.color[2], static_cast<float>(state.type)},
+         .a = state.a,
+         .b = state.b,
+         .c = state.c,
+diff --git aurora-orig/lib/gx/texture.cpp aurora/lib/gx/texture.cpp
+index 7647439..4cd260a 100644
+--- aurora-orig/lib/gx/texture.cpp
++++ aurora/lib/gx/texture.cpp
+@@ -22,6 +22,13 @@
+ #include <optional>
+ #include <utility>
+ 
++#if defined(HBX_SWITCH2)
++#include <atomic>
++// Read by the runtime's MKW_PERF_STATS report.
++std::atomic<uint64_t> aurora_hbx_tex_misses{0};
++std::atomic<uint64_t> aurora_hbx_tex_zero{0};
++#endif
++
+ namespace aurora::gx {
+ namespace {
+ constexpr Module Log{"aurora::gx::texture"};
+@@ -209,6 +216,23 @@ void clear_texture_dependency(u32 texObjId, const CachedTextureEntry& entry) {
+   clear_texture_dependency(texObjId, entry.tlutObjId, entry.replacementId);
+ }
+ 
++#if defined(HBX_SWITCH2)
++// Counts every texture upload and how many had an all-zero source, for the runtime's
++// MKW_PERF_STATS report, and describes the first uploads in the log.
++void hbx_note_texture_miss(const GXTexObj_& obj, size_t bytes) noexcept {
++  const auto* data = static_cast<const uint8_t*>(obj.data);
++  const bool zero = std::all_of(data, data + bytes, [](uint8_t value) { return value == 0; });
++  const uint64_t count = aurora_hbx_tex_misses.fetch_add(1, std::memory_order_relaxed) + 1;
++  if (zero) {
++    aurora_hbx_tex_zero.fetch_add(1, std::memory_order_relaxed);
++  }
++  if (count <= 200 || (zero && count <= 2000) || (obj.width() >= 512 && obj.format() != GX_TF_I8)) {
++    Log.info("texture upload {}: format {} {}x{} mips {} {} KiB{}", count, static_cast<int>(obj.format()), obj.width(),
++             obj.height(), obj.mip_count(), bytes / 1024, zero ? " ALL ZERO" : "");
++  }
++}
++#endif
++
+ uint64_t source_generation(const void* data, size_t size) noexcept {
+   return gfx::presentation::guest_write_generation(data, size);
+ }
+@@ -737,6 +761,9 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
+       const size_t sourceBytes = texture_source_size(obj.format(), obj.width(), obj.height(), obj.mip_count());
+       handle = gfx::new_static_texture_2d(obj.width(), obj.height(), obj.mip_count(), obj.format(),
+                                           {static_cast<const uint8_t*>(obj.data), sourceBytes}, false, nameStr);
++#if defined(HBX_SWITCH2)
++      hbx_note_texture_miss(obj, sourceBytes);
++#endif
+       ++s_stats.misses;
+       s_stats.uploadBytes += texture_handle_size(handle);
+       cache_content_texture(std::move(keys->contentKey), handle);
+@@ -797,6 +824,9 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
+       handle = gfx::new_static_texture_2d(obj.width(), obj.height(), obj.mip_count(), GX_TF_RGBA8_PC,
+                                           {converted.data.data(), converted.data.size()}, false,
+                                           "GX Static Palette Texture");
++#if defined(HBX_SWITCH2)
++      hbx_note_texture_miss(obj, textureBytes);
++#endif
+       handle->hasArbitraryMips = converted.hasArbitraryMips;
+       ++s_stats.misses;
+       s_stats.uploadBytes += texture_handle_size(handle);
+@@ -962,6 +992,15 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
+       }
+     } else if (copyRef != nullptr) {
+       handle = copyRef->handle;
++#if defined(HBX_SWITCH2)
++      // Static art at an address that once held an EFB copy would draw that copy instead.
++      static int s_copyLogs = 0;
++      if (obj.width() >= 512 && s_copyLogs < 40) {
++        ++s_copyLogs;
++        Log.warn("slot {} draws an EFB copy for a {}x{} format {} texture", i, obj.width(), obj.height(),
++                 static_cast<int>(obj.format()));
++      }
++#endif
+     } else if (obj.has_data()) {
+       handle = texture::resolve_static_texture(obj);
+     }
+diff --git aurora-orig/lib/webgpu/gpu.cpp aurora/lib/webgpu/gpu.cpp
+index 6f4caab..3cf59d7 100644
+--- aurora-orig/lib/webgpu/gpu.cpp
++++ aurora/lib/webgpu/gpu.cpp
+@@ -5,6 +5,8 @@
+ #include <array>
+ #include <cmath>
+ #include <cstdint>
++#include <cstdlib>
++#include <deque>
+ #include <span>
+ #include <string>
+ #include <string_view>
+@@ -36,6 +38,32 @@
+ namespace aurora::webgpu {
+ static Module Log("aurora::gpu");
+ 
++#if defined(HBX_SWITCH2)
++// HBLauncher (Switch 2): extra Dawn device toggles from the environment (hbxl-env), comma-separated,
++// so toggle experiments need no rebuild: AURORA_DAWN_ENABLE and AURORA_DAWN_DISABLE.
++static std::deque<std::string> g_hbxToggleNames; // stable storage for the toggle names
++
++static void hbx_append_toggles(const char* variable, std::vector<const char*>& toggles) {
++  const char* value = std::getenv(variable);
++  if (value == nullptr) {
++    return;
++  }
++  std::string_view rest{value};
++  while (!rest.empty()) {
++    const auto comma = rest.find(',');
++    const auto name = rest.substr(0, comma);
++    if (!name.empty()) {
++      toggles.push_back(g_hbxToggleNames.emplace_back(name).c_str());
++      Log.info("{}: {}", variable, name);
++    }
++    if (comma == std::string_view::npos) {
++      break;
++    }
++    rest.remove_prefix(comma + 1);
++  }
++}
++#endif
++
+ wgpu::Device g_device;
+ wgpu::Queue g_queue;
+ wgpu::Surface g_surface;
+@@ -816,6 +844,148 @@ static bool create_surface() {
+   return true;
+ }
+ 
++#if defined(HBX_SWITCH2)
++extern "C" bool dawn_hbx_keep_dedicated;
++extern "C" uint32_t dawn_hbx_last_dedicated;
++
++namespace {
++// AURORA_HBX_SELFTEST=1: uploads each size the way the game does, then reads it back directly and
++// through a shader, with and without dedicated memory. Black track art came with large textures,
++// and this tells apart a failed upload, a failed sample and the memory route.
++bool hbx_map_read(wgpu::Buffer& buffer, uint64_t size) {
++  bool ok = false;
++  const auto future = buffer.MapAsync(wgpu::MapMode::Read, 0, size, wgpu::CallbackMode::WaitAnyOnly,
++                                      [&ok](wgpu::MapAsyncStatus status, wgpu::StringView) {
++                                        ok = status == wgpu::MapAsyncStatus::Success;
++                                      });
++  return g_instance.WaitAny(future, 5000000000) == wgpu::WaitStatus::Success && ok;
++}
++
++void hbx_texture_self_test() {
++  static constexpr char source[] = R"(
++@group(0) @binding(0) var t: texture_2d<f32>;
++@group(0) @binding(1) var s: sampler;
++@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
++  var p = array(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
++  return vec4f(p[i], 0.0, 1.0);
++}
++@fragment fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
++  return textureSampleLevel(t, s, p.xy / 16.0, 0.0);
++}
++)";
++  wgpu::ShaderSourceWGSL wgsl;
++  wgsl.code = source;
++  const wgpu::ShaderModuleDescriptor moduleDesc{.nextInChain = &wgsl, .label = "HBX self-test"};
++  const auto module = g_device.CreateShaderModule(&moduleDesc);
++  const wgpu::ColorTargetState colorTarget{.format = wgpu::TextureFormat::RGBA8Unorm};
++  const wgpu::FragmentState fragment{.module = module, .entryPoint = "fs", .targetCount = 1, .targets = &colorTarget};
++  const wgpu::RenderPipelineDescriptor pipelineDesc{
++      .label = "HBX self-test",
++      .vertex = {.module = module, .entryPoint = "vs"},
++      .fragment = &fragment,
++  };
++  const auto pipeline = g_device.CreateRenderPipeline(&pipelineDesc);
++  const wgpu::SamplerDescriptor samplerDesc{.label = "HBX self-test"};
++  const auto sampler = g_device.CreateSampler(&samplerDesc);
++
++  static constexpr std::array<std::array<uint32_t, 2>, 6> sizes{
++      {{256, 128}, {512, 512}, {832, 140}, {832, 316}, {1024, 512}, {1024, 1024}}};
++  static constexpr uint32_t pixel = 0xFF336699u;
++  for (const bool keepDedicated : {true, false}) {
++    dawn_hbx_keep_dedicated = keepDedicated;
++    for (const auto& [width, height] : sizes) {
++      const uint32_t bytesPerRow = width * 4;
++      const uint32_t alignedRow = (bytesPerRow + 255u) & ~255u;
++      const uint64_t bytes = uint64_t{alignedRow} * height;
++      const wgpu::BufferDescriptor uploadDesc{.label = "HBX self-test upload",
++                                              .usage = wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc,
++                                              .size = bytes,
++                                              .mappedAtCreation = true};
++      auto upload = g_device.CreateBuffer(&uploadDesc);
++      std::fill_n(static_cast<uint32_t*>(upload.GetMappedRange(0, bytes)), bytes / 4, pixel);
++      upload.Unmap();
++
++      const wgpu::TextureDescriptor textureDesc{
++          .label = "HBX self-test texture",
++          .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc,
++          .size = {width, height},
++          .format = wgpu::TextureFormat::RGBA8Unorm,
++      };
++      auto texture = g_device.CreateTexture(&textureDesc);
++      const uint32_t dedicated = dawn_hbx_last_dedicated;
++      const wgpu::TextureDescriptor targetDesc{
++          .label = "HBX self-test target",
++          .usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc,
++          .size = {16, 16},
++          .format = wgpu::TextureFormat::RGBA8Unorm,
++      };
++      auto target = g_device.CreateTexture(&targetDesc);
++      const wgpu::BufferDescriptor readDesc{.label = "HBX self-test read",
++                                            .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
++                                            .size = bytes};
++      auto texels = g_device.CreateBuffer(&readDesc);
++      const wgpu::BufferDescriptor sampledDesc{.label = "HBX self-test sampled",
++                                               .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
++                                               .size = 256 * 16};
++      auto sampled = g_device.CreateBuffer(&sampledDesc);
++
++      const std::array<wgpu::BindGroupEntry, 2> entries{
++          wgpu::BindGroupEntry{.binding = 0, .textureView = texture.CreateView()},
++          wgpu::BindGroupEntry{.binding = 1, .sampler = sampler},
++      };
++      const wgpu::BindGroupDescriptor groupDesc{
++          .layout = pipeline.GetBindGroupLayout(0), .entryCount = entries.size(), .entries = entries.data()};
++      const auto group = g_device.CreateBindGroup(&groupDesc);
++
++      const auto encoder = g_device.CreateCommandEncoder();
++      const wgpu::TexelCopyBufferInfo src{.layout = {.bytesPerRow = alignedRow, .rowsPerImage = height},
++                                          .buffer = upload};
++      const wgpu::TexelCopyTextureInfo dst{.texture = texture};
++      const wgpu::Extent3D copySize{width, height, 1};
++      encoder.CopyBufferToTexture(&src, &dst, &copySize);
++      const wgpu::RenderPassColorAttachment attachment{.view = target.CreateView(),
++                                                       .loadOp = wgpu::LoadOp::Clear,
++                                                       .storeOp = wgpu::StoreOp::Store,
++                                                       .clearValue = {0.0, 0.0, 0.0, 0.0}};
++      const wgpu::RenderPassDescriptor passDesc{.colorAttachmentCount = 1, .colorAttachments = &attachment};
++      const auto pass = encoder.BeginRenderPass(&passDesc);
++      pass.SetPipeline(pipeline);
++      pass.SetBindGroup(0, group);
++      pass.Draw(3);
++      pass.End();
++      const wgpu::TexelCopyTextureInfo readTexture{.texture = texture};
++      const wgpu::TexelCopyBufferInfo readTexels{.layout = {.bytesPerRow = alignedRow, .rowsPerImage = height},
++                                                 .buffer = texels};
++      encoder.CopyTextureToBuffer(&readTexture, &readTexels, &copySize);
++      const wgpu::TexelCopyTextureInfo readTarget{.texture = target};
++      const wgpu::TexelCopyBufferInfo readSampled{.layout = {.bytesPerRow = 256, .rowsPerImage = 16},
++                                                  .buffer = sampled};
++      const wgpu::Extent3D targetSize{16, 16, 1};
++      encoder.CopyTextureToBuffer(&readTarget, &readSampled, &targetSize);
++      const auto commands = encoder.Finish();
++      g_queue.Submit(1, &commands);
++
++      uint32_t texelFirst = 0;
++      uint32_t texelLast = 0;
++      uint32_t sampledPixel = 0;
++      if (hbx_map_read(texels, bytes)) {
++        const auto* data = static_cast<const uint32_t*>(texels.GetConstMappedRange(0, bytes));
++        texelFirst = data[0];
++        texelLast = data[bytes / 4 - 1 - (alignedRow - bytesPerRow) / 4];
++      }
++      if (hbx_map_read(sampled, 256 * 16)) {
++        sampledPixel = static_cast<const uint32_t*>(sampled.GetConstMappedRange(0, 256 * 16))[8 * 64 + 8];
++      }
++      Log.info("self-test {}x{} {} MiB dedicated {} (driver flags {}): first {:08x} last {:08x} sampled {:08x} {}",
++               width, height, bytesPerRow * height / 1048576.0, keepDedicated, dedicated, texelFirst, texelLast,
++               sampledPixel, texelFirst == pixel && texelLast == pixel && sampledPixel == pixel ? "ok" : "FAILED");
++    }
++  }
++  dawn_hbx_keep_dedicated = false;
++}
++} // namespace
++#endif
++
+ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+   if (!g_instance) {
+     Log.info("Creating WebGPU instance");
+@@ -1017,6 +1187,25 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+       }
+ #endif
+     }
++#if defined(HBX_SWITCH2)
++    // Without this Dawn has no device lock at all, and aurora calls the device from the game,
++    // render and pipeline threads at once. Slower cores make the collisions visible.
++    if (g_adapter.HasFeature(wgpu::FeatureName::ImplicitDeviceSynchronization)) {
++      requiredFeatures.push_back(wgpu::FeatureName::ImplicitDeviceSynchronization);
++    }
++    // Copies into textures come out empty on the console, apparently depending on which of Dawn's
++    // 8 MiB memory blocks a texture lands in. One large block keeps every texture in the same place.
++    size_t hbxHeapBlockBytes = size_t{512} << 20;
++    if (const char* blockMib = std::getenv("AURORA_HBX_HEAP_BLOCK_MIB")) {
++      hbxHeapBlockBytes = static_cast<size_t>(std::strtoul(blockMib, nullptr, 10)) << 20;
++    }
++    const bool hbxHeapBlock = hbxHeapBlockBytes != 0 && (hbxHeapBlockBytes & (hbxHeapBlockBytes - 1)) == 0 &&
++                              g_adapter.HasFeature(wgpu::FeatureName::DawnDeviceAllocatorControl);
++    if (hbxHeapBlock) {
++      requiredFeatures.push_back(wgpu::FeatureName::DawnDeviceAllocatorControl);
++      Log.info("Dawn heap block size: {} MiB", hbxHeapBlockBytes >> 20);
++    }
++#endif
+     std::string featureList;
+     for (auto featureName : requiredFeatures) {
+       featureList += "\n  ";
+@@ -1025,6 +1214,13 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+     Log.info("Enabling features: {}", featureList);
+ #ifdef WEBGPU_DAWN
+     wgpu::DawnCacheDeviceDescriptor cacheDescriptor({.nextInChain = nullptr});
++#if defined(HBX_SWITCH2)
++    wgpu::DawnDeviceAllocatorControl hbxAllocatorControl{};
++    hbxAllocatorControl.allocatorHeapBlockSize = hbxHeapBlockBytes;
++    if (hbxHeapBlock) {
++      cacheDescriptor.nextInChain = &hbxAllocatorControl;
++    }
++#endif
+     cacheDescriptor.SetDawnLoadCacheDataCallback(
+         [](std::span<const std::byte> key, std::span<std::byte> value) noexcept -> size_t {
+           return load_from_cache(key.data(), key.size(), value.data(), value.size(), nullptr);
+@@ -1058,6 +1254,19 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+         // https://github.com/TwilitRealm/dusklight/issues/2563
+         "use_spirv_reconvergence_mode",
+     };
++#if defined(HBX_SWITCH2)
++    std::vector<const char*> enabledToggles(enableToggles.begin(), enableToggles.end());
++    std::vector<const char*> disabledToggles(disableToggles.begin(), disableToggles.end());
++    hbx_append_toggles("AURORA_DAWN_ENABLE", enabledToggles);
++    hbx_append_toggles("AURORA_DAWN_DISABLE", disabledToggles);
++    wgpu::DawnTogglesDescriptor togglesDescriptor(wgpu::DawnTogglesDescriptor::Init{
++        .nextInChain = &cacheDescriptor,
++        .enabledToggleCount = enabledToggles.size(),
++        .enabledToggles = enabledToggles.data(),
++        .disabledToggleCount = disabledToggles.size(),
++        .disabledToggles = disabledToggles.data(),
++    });
++#else
+     wgpu::DawnTogglesDescriptor togglesDescriptor(wgpu::DawnTogglesDescriptor::Init{
+         .nextInChain = &cacheDescriptor,
+         .enabledToggleCount = enableToggles.size(),
+@@ -1065,6 +1274,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+         .disabledToggleCount = disableToggles.size(),
+         .disabledToggles = disableToggles.data(),
+     });
++#endif
+ #endif
+     wgpu::DeviceDescriptor deviceDescriptor({
+ #ifdef WEBGPU_DAWN
+@@ -1130,6 +1340,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+   auto presentMode = select_present_mode(g_surfaceCapabilities);
+   Log.info("Using surface format {}, present mode {}", magic_enum::enum_name(surfaceFormat),
+            magic_enum::enum_name(presentMode));
++#if defined(HBX_SWITCH2)
++  if (std::getenv("AURORA_HBX_SELFTEST") != nullptr) {
++    hbx_texture_self_test();
++  }
++#endif
+   const auto size = window::get_window_size();
+   g_graphicsConfig = GraphicsConfig{
+       .surfaceConfiguration =
+@@ -1172,6 +1387,13 @@ void shutdown() {
+   g_graphicsConfig.normalBuffer = false;
+   g_queue = {};
+   g_surface = {};
++#if defined(HBX_SWITCH2)
++  // The app returns to the launcher inside one process: leaked GPU memory stays allocated and
++  // the next launch runs out. Destroy frees it even while caches still hold references.
++  if (g_device) {
++    g_device.Destroy();
++  }
++#endif
+   g_device = {};
+   g_adapter = {};
+   g_instance = {};
+diff --git aurora-orig/lib/webgpu/gpu_cache.cpp aurora/lib/webgpu/gpu_cache.cpp
+index 6fb60ad..500ac08 100644
+--- aurora-orig/lib/webgpu/gpu_cache.cpp
++++ aurora/lib/webgpu/gpu_cache.cpp
+@@ -1,5 +1,6 @@
+ #include <cstring>
+ #include <cstdint>
++#include <atomic>
+ #include <mutex>
+ #include <optional>
+ #include <string>
+@@ -27,6 +28,27 @@ static sqlite3_stmt* store_stmt;
+ static bool cache_broken;
+ static std::mutex cache_mutex;
+ static std::vector<XXH128_hash_t> cache_keys_used;
++
++// While stores are deferred (races, aurora_set_cache_writes_deferred), new shaders wait here instead
++// of being written to storage from the compiling thread, and the pipeline cache writer thread writes
++// them afterwards. Loads look here first.
++struct DeferredStore {
++  std::vector<uint8_t> key;
++  std::vector<uint8_t> value;
++};
++static std::atomic_bool stores_deferred{false};
++static std::vector<DeferredStore> deferred_stores;
++static size_t deferred_bytes = 0;
++constexpr size_t MaxDeferredBytes = 64u * 1024u * 1024u;
++
++static const DeferredStore* find_deferred(void const* key, size_t keySize) {
++  for (const auto& entry : deferred_stores) {
++    if (entry.key.size() == keySize && std::memcmp(entry.key.data(), key, keySize) == 0) {
++      return &entry;
++    }
++  }
++  return nullptr;
++}
+ #if defined(AURORA_CACHE_USE_ZSTD)
+ static std::vector<uint8_t> compress_buffer;
+ #endif
+@@ -252,6 +274,13 @@ static bool cache_init() {
+ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valueSize, void*) {
+   std::lock_guard lock(cache_mutex);
+ 
++  if (const auto* deferred = find_deferred(key, keySize)) {
++    if (value && valueSize == deferred->value.size()) {
++      std::memcpy(value, deferred->value.data(), valueSize);
++    }
++    return deferred->value.size();
++  }
++
+   if (!cache_init()) {
+     return 0;
+   }
+@@ -348,9 +377,41 @@ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valu
+   return foundSize;
+ }
+ 
++static void store_locked(void const* key, size_t keySize, void const* value, size_t valueSize);
++
+ void store_to_cache(void const* key, size_t keySize, void const* value, size_t valueSize, void*) {
+   std::lock_guard lock(cache_mutex);
++  if (stores_deferred.load(std::memory_order_acquire) && deferred_bytes + keySize + valueSize <= MaxDeferredBytes) {
++    if (!find_deferred(key, keySize)) {
++      const auto* keyBytes = static_cast<const uint8_t*>(key);
++      const auto* valueBytes = static_cast<const uint8_t*>(value);
++      deferred_stores.push_back({{keyBytes, keyBytes + keySize}, {valueBytes, valueBytes + valueSize}});
++      deferred_bytes += keySize + valueSize;
++      cache_keys_used.push_back(XXH128(key, keySize, 0));
++    }
++    return;
++  }
++  store_locked(key, keySize, value, valueSize);
++}
++
++void set_cache_stores_deferred(bool deferred) { stores_deferred.store(deferred, std::memory_order_release); }
++
++bool has_deferred_stores() {
++  std::lock_guard lock(cache_mutex);
++  return !deferred_stores.empty();
++}
++
++// From the pipeline cache writer thread once a race is over, and at shutdown.
++void flush_deferred_stores() {
++  std::lock_guard lock(cache_mutex);
++  for (const auto& entry : deferred_stores) {
++    store_locked(entry.key.data(), entry.key.size(), entry.value.data(), entry.value.size());
++  }
++  deferred_stores.clear();
++  deferred_bytes = 0;
++}
+ 
++static void store_locked(void const* key, size_t keySize, void const* value, size_t valueSize) {
+   if (!cache_init()) {
+     return;
+   }

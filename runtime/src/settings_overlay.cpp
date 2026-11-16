@@ -1904,10 +1904,8 @@ void ConsoleChangeVolume(int delta) {
 // charger, and at the system's on battery; the CPU keeps its rate either way.
 extern "C" uint32_t kaihen_clock_chosen_mhz(int clock);
 extern "C" uint32_t kaihen_clock_max_mhz(int clock);
-extern "C" uint32_t kaihen_clock_now_hz(int clock);
 extern "C" int kaihen_clock_choose_mhz(int clock, uint32_t mhz);
 extern "C" uint32_t kaihen_cpu_clock_chosen_mhz(void);
-extern "C" uint32_t kaihen_cpu_clock_now_hz(void);
 extern "C" int kaihen_cpu_clock_choose_mhz(uint32_t mhz);
 extern "C" int kaihen_power_plugged(void);
 // Rates the console runs at (it rounds others to its own steps: 1300 runs 1292.8, 2666 runs 2750).
@@ -2102,13 +2100,6 @@ void DrawConsoleMenu() {
             ImGui::TextDisabled("  Power: plugged in. Memory and GPU run as chosen.");
         } else {
             ImGui::TextDisabled("  Power: battery. Memory and GPU at System until plugged in.");
-        }
-        // Debug only (MKW_PERF_STATS=1): the CPU's measured speed, to see the console halve it. It
-        // is a timed loop, so a percent or so under the setting. Remove before release.
-        if (PerfStats::Enabled()) {
-            ImGui::TextDisabled("  Now: CPU about %.0f MHz (set %.0f), memory %.0f MHz, GPU %.0f MHz",
-                                static_cast<double>(PerfStats::CurrentCpuMhz()), kaihen_cpu_clock_now_hz() / 1e6,
-                                kaihen_clock_now_hz(0) / 1e6, kaihen_clock_now_hz(1) / 1e6);
         }
 #else
         row(4, std::string("Race GX worker: ") + (GxWorker::RaceDeferring() ? "On" : "Off"));

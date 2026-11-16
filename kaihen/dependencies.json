@@ -1,0 +1,20 @@
+{
+  "ounce-devkit": {
+    "repository": "https://github.com/ouncebrew/ounce-devkit",
+    "commit": "f3478152dc553a104dd991efca4bde0c6e7cfe3e"
+  },
+  "dawn": {
+    "repository": "https://github.com/encounter/dawn",
+    "commit": "1155e0ed531126f33a1279afa029349651ca1c93",
+    "patch": "dawn-kaihen.diff"
+  },
+  "sdl3": {
+    "repository": "https://github.com/libsdl-org/SDL",
+    "commit": "8e37db5e797b6167f3a00d697d816a684bd259c7",
+    "version": "3.4.10",
+    "patch": "sdl3-kaihen.diff"
+  },
+  "aurora": {
+    "patch": "aurora-kaihen.diff"
+  }
+}

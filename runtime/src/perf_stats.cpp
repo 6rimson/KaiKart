@@ -38,11 +38,6 @@ extern "C" volatile long hbxl_net_inflight_call __attribute__((weak));
 extern "C" volatile long hbxl_net_inflight_fd __attribute__((weak));
 extern "C" volatile int hbxl_net_resolving __attribute__((weak));
 extern "C" void hbxl_logf(const char* format, ...) __attribute__((weak));
-#if defined(MKW_KAIHEN)
-extern "C" uint32_t kaihen_clock_now_hz(int clock);
-extern "C" uint32_t kaihen_cpu_clock_now_hz(void);
-extern "C" int kaihen_power_plugged(void);
-#endif
 #endif
 
 namespace PerfStats {
@@ -328,14 +323,6 @@ void OnFramePresented() noexcept {
     RT_LOGF("perf", "memory slow-path calls/frame %llu\n",
             static_cast<unsigned long long>((slow - lastSlow) / kWindow));
     lastSlow = slow;
-#if defined(MKW_KAIHEN)
-    // Debug only: the CPU's measured speed next to the clocks' settings (the console can halve the
-    // CPU without the setting changing). Remove before release.
-    RT_LOGF("perf", "clocks: CPU about %.0f MHz (set %.1f), memory %.1f MHz, GPU %.1f MHz, %s\n",
-            static_cast<double>(g_cpuMhzNow.load(std::memory_order_relaxed)), kaihen_cpu_clock_now_hz() / 1e6,
-            kaihen_clock_now_hz(0) / 1e6, kaihen_clock_now_hz(1) / 1e6,
-            kaihen_power_plugged() ? "plugged in" : "battery");
-#endif
     {
         const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count() / kWindow; };
         static uint64_t lastGpuWait = 0, lastRender = 0, lastDone = 0, lastDoneCount = 0;
@@ -460,7 +447,6 @@ float MeasureCpuMhz() {
     return static_cast<float>(2000.0 / NsPer(kOps, start));
 }
 
-float CurrentCpuMhz() { return g_cpuMhzNow.load(std::memory_order_relaxed); }
 
 void LogCoreCalibration(const uint8_t* guestRam, size_t size) {
     CalibrateThisThread("main thread", guestRam, size);

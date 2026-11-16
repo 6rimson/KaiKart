@@ -1,5 +1,5 @@
 # kaiHEN (native Switch 2 homebrew): the Switch 2 devkit's toolchain (newlib, libounce), static, PIE as
-# libnx requires. KAIHEN_COMPILER=clang (environment): Clang compiles (as in the HBLauncher build, with its PGO profiles) and
+# libnx requires. KAIHEN_COMPILER=clang (environment): Clang compiles (with the shipped PGO profiles) and
 # the devkit's GCC links; otherwise the devkit's GCC does both. This port's flags are added in
 # Platform/ next to this file, after the devkit's platform file sets its own.
 if("$ENV{KAIHEN_COMPILER}" STREQUAL "clang")

@@ -1,13 +1,14 @@
+diff --git sdl3-orig/CMakeLists.txt sdl3/CMakeLists.txt
+index faf6d900c..43231df1e 100644
 --- sdl3-orig/CMakeLists.txt
 +++ sdl3/CMakeLists.txt
-@@ -2923,6 +2923,30 @@
+@@ -2916,6 +2916,33 @@ elseif(RISCOS)
      CheckOSS()
    endif()
  
 +elseif(NINTENDO_SWITCH)
 +  # kaiHEN (Switch 2 homebrew: libounce and newlib): pthreads, Unix time and timers, POSIX file
-+  # operations, paths on the microSD. Audio and input are the HBLauncher drivers above
-+  # (HBX_SWITCH2), fed by the app.
++  # operations, paths on the microSD, and audio and the controller through libnx (audout, pad).
 +  sdl_sources("${SDL3_SOURCE_DIR}/src/filesystem/switch/SDL_sysfilesystem.c")
 +  set(HAVE_SDL_FILESYSTEM TRUE)
 +
@@ -28,10 +29,244 @@
 +  set(SDL_PTHREADS_PRIVATE ON)
 +  CheckPTHREAD()
 +
++  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/audio/kaihen/*.c" "${SDL3_SOURCE_DIR}/src/joystick/kaihen/*.c")
++  sdl_compile_definitions(PRIVATE SDL_AUDIO_DRIVER_KAIHEN=1 SDL_JOYSTICK_KAIHEN=1)
++  set(HAVE_SDL_AUDIO TRUE)
++
  elseif(VITA)
    # SDL_spinlock.c Needs to be compiled in ARM mode.
    cmake_push_check_state()
---- sdl3-orig/src/filesystem/switch/SDL_sysfilesystem.c
+diff --git sdl3-orig/src/audio/SDL_audio.c sdl3/src/audio/SDL_audio.c
+index c1e424142..4557c75a5 100644
+--- sdl3-orig/src/audio/SDL_audio.c
++++ sdl3/src/audio/SDL_audio.c
+@@ -26,6 +26,9 @@
+ 
+ // Available audio drivers
+ static const AudioBootStrap *const bootstrap[] = {
++#ifdef SDL_AUDIO_DRIVER_KAIHEN
++    &KAIHENAUDIO_bootstrap,
++#endif
+ #ifdef SDL_AUDIO_DRIVER_PRIVATE
+     &PRIVATEAUDIO_bootstrap,
+ #endif
+diff --git sdl3-orig/src/audio/SDL_sysaudio.h sdl3/src/audio/SDL_sysaudio.h
+index 9104be82a..7d064257f 100644
+--- sdl3-orig/src/audio/SDL_sysaudio.h
++++ sdl3/src/audio/SDL_sysaudio.h
+@@ -381,6 +381,7 @@ extern AudioBootStrap HAIKUAUDIO_bootstrap;
+ extern AudioBootStrap COREAUDIO_bootstrap;
+ extern AudioBootStrap DISKAUDIO_bootstrap;
+ extern AudioBootStrap DUMMYAUDIO_bootstrap;
++extern AudioBootStrap KAIHENAUDIO_bootstrap;
+ extern AudioBootStrap AAUDIO_bootstrap;
+ extern AudioBootStrap OPENSLES_bootstrap;
+ extern AudioBootStrap PS2AUDIO_bootstrap;
+diff --git sdl3-orig/src/audio/kaihen/SDL_kaihenaudio.c sdl3/src/audio/kaihen/SDL_kaihenaudio.c
+new file mode 100644
+index 000000000..be230fc41
+--- /dev/null
++++ sdl3/src/audio/kaihen/SDL_kaihenaudio.c
+@@ -0,0 +1,182 @@
++/*
++  SDL audio driver for kaiHEN (Switch 2 homebrew on libounce).
++
++  Plays through libnx's audout: 48 kHz, stereo, signed 16-bit, four buffers of 1024 frames in
++  page-aligned memory (audout's requirement). SDL converts any other format.
++*/
++#include "SDL_internal.h"
++
++#ifdef SDL_AUDIO_DRIVER_KAIHEN
++
++#include "../SDL_sysaudio.h"
++#include <switch.h>
++
++#define KAIHEN_AUDIO_BUFFERS 4
++#define KAIHEN_AUDIO_FRAMES 1024
++#define KAIHEN_AUDIO_BUFFER_BYTES (KAIHEN_AUDIO_FRAMES * 4)
++
++struct SDL_PrivateAudioData
++{
++    AudioOutBuffer buffers[KAIHEN_AUDIO_BUFFERS];
++    Uint8 *pcm;
++    bool busy[KAIHEN_AUDIO_BUFFERS];
++    int queued;
++    int current;
++    bool started;
++    bool opened;
++};
++
++static void KAIHENAUDIO_Reclaim(SDL_AudioDevice *device)
++{
++    struct SDL_PrivateAudioData *h = device->hidden;
++    int guard;
++    for (guard = 0; guard <= KAIHEN_AUDIO_BUFFERS; guard++) {
++        AudioOutBuffer *released = NULL;
++        u32 count = 0;
++        int i;
++        if (R_FAILED(audoutGetReleasedAudioOutBuffer(&released, &count)) || count == 0 || !released) {
++            return;
++        }
++        for (i = 0; i < KAIHEN_AUDIO_BUFFERS; i++) {
++            if (released == &h->buffers[i] && h->busy[i]) {
++                h->busy[i] = false;
++                h->queued--;
++                break;
++            }
++        }
++    }
++}
++
++static int KAIHENAUDIO_FreeSlot(SDL_AudioDevice *device)
++{
++    int i;
++    for (i = 0; i < KAIHEN_AUDIO_BUFFERS; i++) {
++        if (!device->hidden->busy[i]) {
++            return i;
++        }
++    }
++    return -1;
++}
++
++static bool KAIHENAUDIO_WaitDevice(SDL_AudioDevice *device)
++{
++    while (!SDL_GetAtomicInt(&device->shutdown)) {
++        KAIHENAUDIO_Reclaim(device);
++        if (KAIHENAUDIO_FreeSlot(device) >= 0) {
++            return true;
++        }
++        SDL_Delay(2);
++    }
++    return true;
++}
++
++static Uint8 *KAIHENAUDIO_GetDeviceBuf(SDL_AudioDevice *device, int *buffer_size)
++{
++    struct SDL_PrivateAudioData *h = device->hidden;
++    h->current = KAIHENAUDIO_FreeSlot(device);
++    if (h->current < 0) {
++        h->current = 0; // WaitDevice guarantees a slot; stay defensive
++    }
++    *buffer_size = KAIHEN_AUDIO_BUFFER_BYTES;
++    return h->pcm + h->current * KAIHEN_AUDIO_BUFFER_BYTES;
++}
++
++static bool KAIHENAUDIO_PlayDevice(SDL_AudioDevice *device, const Uint8 *buffer, int buflen)
++{
++    struct SDL_PrivateAudioData *h = device->hidden;
++    AudioOutBuffer *out;
++    int i = h->current;
++    if (i < 0 || h->busy[i]) {
++        return true;
++    }
++    out = &h->buffers[i];
++    SDL_memset(out, 0, sizeof(*out));
++    out->buffer = h->pcm + i * KAIHEN_AUDIO_BUFFER_BYTES;
++    out->buffer_size = KAIHEN_AUDIO_BUFFER_BYTES;
++    out->data_size = (u64)buflen;
++    if (R_FAILED(audoutAppendAudioOutBuffer(out))) {
++        return true; // dropped; keep the stream alive
++    }
++    h->busy[i] = true;
++    h->queued++;
++    if (!h->started && h->queued >= 2 && R_SUCCEEDED(audoutStartAudioOut())) {
++        h->started = true;
++    }
++    return true;
++}
++
++static void KAIHENAUDIO_CloseDevice(SDL_AudioDevice *device)
++{
++    struct SDL_PrivateAudioData *h = device->hidden;
++    int tries;
++    if (!h) {
++        return;
++    }
++    if (h->opened) {
++        if (h->started) {
++            audoutStopAudioOut();
++        }
++        for (tries = 0; tries < 40 && h->queued > 0; tries++) {
++            KAIHENAUDIO_Reclaim(device);
++            if (h->queued > 0) {
++                SDL_Delay(1);
++            }
++        }
++        audoutExit();
++    }
++    SDL_aligned_free(h->pcm);
++    SDL_free(h);
++    device->hidden = NULL;
++}
++
++static bool KAIHENAUDIO_OpenDevice(SDL_AudioDevice *device)
++{
++    struct SDL_PrivateAudioData *h;
++    Result rc;
++
++    if (device->recording) {
++        return SDL_SetError("kaihen: recording is not supported");
++    }
++    h = (struct SDL_PrivateAudioData *)SDL_calloc(1, sizeof(*h));
++    if (!h) {
++        return false;
++    }
++    device->hidden = h;
++    h->pcm = (Uint8 *)SDL_aligned_alloc(0x1000, KAIHEN_AUDIO_BUFFERS * KAIHEN_AUDIO_BUFFER_BYTES);
++    if (!h->pcm) {
++        return false;
++    }
++    SDL_memset(h->pcm, 0, KAIHEN_AUDIO_BUFFERS * KAIHEN_AUDIO_BUFFER_BYTES);
++    rc = audoutInitialize();
++    if (R_FAILED(rc)) {
++        return SDL_SetError("kaihen: audoutInitialize failed (0x%x)", (unsigned)rc);
++    }
++    h->opened = true;
++    if (audoutGetSampleRate() != 48000 || audoutGetChannelCount() != 2 || audoutGetPcmFormat() != PcmFormat_Int16) {
++        return SDL_SetError("kaihen: audout is not 48 kHz stereo s16");
++    }
++
++    device->spec.format = SDL_AUDIO_S16LE;
++    device->spec.channels = 2;
++    device->spec.freq = 48000;
++    device->sample_frames = KAIHEN_AUDIO_FRAMES;
++    SDL_UpdatedAudioDeviceFormat(device);
++    return true;
++}
++
++static bool KAIHENAUDIO_Init(SDL_AudioDriverImpl *impl)
++{
++    impl->OpenDevice = KAIHENAUDIO_OpenDevice;
++    impl->CloseDevice = KAIHENAUDIO_CloseDevice;
++    impl->WaitDevice = KAIHENAUDIO_WaitDevice;
++    impl->GetDeviceBuf = KAIHENAUDIO_GetDeviceBuf;
++    impl->PlayDevice = KAIHENAUDIO_PlayDevice;
++    impl->OnlyHasDefaultPlaybackDevice = true;
++    return true;
++}
++
++AudioBootStrap KAIHENAUDIO_bootstrap = {
++    "kaihen", "kaiHEN audout", KAIHENAUDIO_Init, false, false
++};
++
++#endif // SDL_AUDIO_DRIVER_KAIHEN
+diff --git sdl3-orig/src/dynapi/SDL_dynapi.h sdl3/src/dynapi/SDL_dynapi.h
+index 786d86ee4..2e3dec5df 100644
+--- sdl3-orig/src/dynapi/SDL_dynapi.h
++++ sdl3/src/dynapi/SDL_dynapi.h
+@@ -63,6 +63,8 @@
+ #define SDL_DYNAMIC_API 0 // vitasdk doesn't support dynamic linking
+ #elif defined(SDL_PLATFORM_3DS)
+ #define SDL_DYNAMIC_API 0 // devkitARM doesn't support dynamic linking
++#elif defined(__SWITCH__)
++#define SDL_DYNAMIC_API 0 // devkitA64 (kaiHEN) doesn't support dynamic linking
+ #elif defined(SDL_PLATFORM_NGAGE)
+ #define SDL_DYNAMIC_API 0
+ #elif defined(DYNAPI_NEEDS_DLOPEN) && !defined(HAVE_DLOPEN)
+diff --git sdl3-orig/src/filesystem/switch/SDL_sysfilesystem.c sdl3/src/filesystem/switch/SDL_sysfilesystem.c
+new file mode 100644
+index 000000000..5edfa2377
+--- /dev/null
 +++ sdl3/src/filesystem/switch/SDL_sysfilesystem.c
 @@ -0,0 +1,60 @@
 +/*
@@ -94,20 +329,191 @@
 +    SDL_Unsupported();
 +    return NULL;
 +}
---- sdl3-orig/src/dynapi/SDL_dynapi.h
-+++ sdl3/src/dynapi/SDL_dynapi.h
-@@ -63,6 +63,8 @@
- #define SDL_DYNAMIC_API 0 // vitasdk doesn't support dynamic linking
- #elif defined(SDL_PLATFORM_3DS)
- #define SDL_DYNAMIC_API 0 // devkitARM doesn't support dynamic linking
-+#elif defined(__SWITCH__)
-+#define SDL_DYNAMIC_API 0 // devkitA64 (kaiHEN) doesn't support dynamic linking
- #elif defined(SDL_PLATFORM_NGAGE)
- #define SDL_DYNAMIC_API 0
- #elif defined(DYNAPI_NEEDS_DLOPEN) && !defined(HAVE_DLOPEN)
+diff --git sdl3-orig/src/joystick/SDL_joystick.c sdl3/src/joystick/SDL_joystick.c
+index 02cc012f1..523983b05 100644
+--- sdl3-orig/src/joystick/SDL_joystick.c
++++ sdl3/src/joystick/SDL_joystick.c
+@@ -106,6 +106,9 @@ static SDL_JoystickDriver *SDL_joystick_drivers[] = {
+ #ifdef SDL_JOYSTICK_N3DS
+     &SDL_N3DS_JoystickDriver,
+ #endif
++#ifdef SDL_JOYSTICK_KAIHEN
++    &SDL_KAIHEN_JoystickDriver,
++#endif
+ #if defined(SDL_JOYSTICK_DUMMY) || defined(SDL_JOYSTICK_DISABLED)
+     &SDL_DUMMY_JoystickDriver
+ #endif
+diff --git sdl3-orig/src/joystick/SDL_sysjoystick.h sdl3/src/joystick/SDL_sysjoystick.h
+index 47ce42cdf..adf7283a5 100644
+--- sdl3-orig/src/joystick/SDL_sysjoystick.h
++++ sdl3/src/joystick/SDL_sysjoystick.h
+@@ -248,6 +248,7 @@ extern SDL_JoystickDriver SDL_ANDROID_JoystickDriver;
+ extern SDL_JoystickDriver SDL_BSD_JoystickDriver;
+ extern SDL_JoystickDriver SDL_DARWIN_JoystickDriver;
+ extern SDL_JoystickDriver SDL_DUMMY_JoystickDriver;
++extern SDL_JoystickDriver SDL_KAIHEN_JoystickDriver;
+ extern SDL_JoystickDriver SDL_EMSCRIPTEN_JoystickDriver;
+ extern SDL_JoystickDriver SDL_HAIKU_JoystickDriver;
+ extern SDL_JoystickDriver SDL_HIDAPI_JoystickDriver;
+diff --git sdl3-orig/src/joystick/kaihen/SDL_kaihenjoystick.c sdl3/src/joystick/kaihen/SDL_kaihenjoystick.c
+new file mode 100644
+index 000000000..e68df45fa
+--- /dev/null
++++ sdl3/src/joystick/kaihen/SDL_kaihenjoystick.c
+@@ -0,0 +1,148 @@
++/*
++  SDL joystick driver for kaiHEN (Switch 2 homebrew on libounce).
++
++  One always-present Switch Pro style controller: libnx's pad for player 1 or handheld (the app
++  configures one player, standard styles). The GUID carries Nintendo's vendor and product so SDL
++  reports a Switch Pro gamepad, and the mapping keeps Nintendo's positional layout (B = south,
++  A = east).
++*/
++#include "SDL_internal.h"
++
++#ifdef SDL_JOYSTICK_KAIHEN
++
++#include "../SDL_sysjoystick.h"
++#include "../SDL_joystick_c.h"
++#include <switch.h>
++
++enum { KJ_A, KJ_B, KJ_X, KJ_Y, KJ_L, KJ_R, KJ_ZL, KJ_ZR, KJ_PLUS, KJ_MINUS, KJ_LSTICK, KJ_RSTICK,
++       KJ_BUTTONS };
++
++static const u64 kj_bits[KJ_BUTTONS] = {
++    HidNpadButton_A, HidNpadButton_B, HidNpadButton_X, HidNpadButton_Y, HidNpadButton_L,
++    HidNpadButton_R, HidNpadButton_ZL, HidNpadButton_ZR, HidNpadButton_Plus, HidNpadButton_Minus,
++    HidNpadButton_StickL, HidNpadButton_StickR
++};
++
++static SDL_JoystickID kj_instance;
++static PadState kj_pad;
++
++static SDL_GUID KJ_GUID(void)
++{
++    return SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_VIRTUAL, 0x057e, 0x2009, 0x0100, "Nintendo",
++                                  "Switch 2 Controller", 'k', 0);
++}
++
++static bool KJ_Init(void)
++{
++    char guid[33];
++    char mapping[512];
++    padInitializeDefault(&kj_pad);
++    SDL_GUIDToString(KJ_GUID(), guid, sizeof(guid));
++    SDL_snprintf(mapping, sizeof(mapping),
++                 "%s,Switch 2 Controller,a:b%d,b:b%d,x:b%d,y:b%d,leftshoulder:b%d,"
++                 "rightshoulder:b%d,lefttrigger:b%d,righttrigger:b%d,start:b%d,back:b%d,"
++                 "leftstick:b%d,rightstick:b%d,dpup:h0.1,dpright:h0.2,dpdown:h0.4,"
++                 "dpleft:h0.8,leftx:a0,lefty:a1,rightx:a2,righty:a3,",
++                 guid, KJ_B, KJ_A, KJ_Y, KJ_X, KJ_L, KJ_R, KJ_ZL, KJ_ZR, KJ_PLUS, KJ_MINUS, KJ_LSTICK,
++                 KJ_RSTICK);
++    SDL_AddGamepadMapping(mapping);
++    kj_instance = SDL_GetNextObjectID();
++    SDL_PrivateJoystickAdded(kj_instance);
++    return true;
++}
++
++static int KJ_GetCount(void) { return 1; }
++static void KJ_Detect(void) {}
++static bool KJ_IsDevicePresent(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name)
++{
++    return false;
++}
++static const char *KJ_GetDeviceName(int device_index) { return "Switch 2 Controller"; }
++static const char *KJ_GetDevicePath(int device_index) { return NULL; }
++static int KJ_GetDeviceSteamVirtualGamepadSlot(int device_index) { return -1; }
++static int KJ_GetDevicePlayerIndex(int device_index) { return 0; }
++static void KJ_SetDevicePlayerIndex(int device_index, int player_index) {}
++static SDL_GUID KJ_GetDeviceGUID(int device_index) { return KJ_GUID(); }
++static SDL_JoystickID KJ_GetDeviceInstanceID(int device_index) { return kj_instance; }
++
++static bool KJ_Open(SDL_Joystick *joystick, int device_index)
++{
++    joystick->nbuttons = KJ_BUTTONS;
++    joystick->naxes = 4;
++    joystick->nhats = 1;
++    return true;
++}
++
++static bool KJ_Rumble(SDL_Joystick *joystick, Uint16 low, Uint16 high) { return SDL_Unsupported(); }
++static bool KJ_RumbleTriggers(SDL_Joystick *joystick, Uint16 l, Uint16 r) { return SDL_Unsupported(); }
++static bool KJ_SetLED(SDL_Joystick *joystick, Uint8 r, Uint8 g, Uint8 b) { return SDL_Unsupported(); }
++static bool KJ_SendEffect(SDL_Joystick *joystick, const void *data, int size) { return SDL_Unsupported(); }
++static bool KJ_SetSensorsEnabled(SDL_Joystick *joystick, bool enabled) { return SDL_Unsupported(); }
++
++// libnx sticks are -32767..32767 with +y up; SDL wants +y down. A small deadzone, as the
++// HBLauncher build had (8% of the range).
++static Sint16 KJ_Axis(s32 value, bool invert)
++{
++    s32 v = invert ? -value : value;
++    if (v > -2621 && v < 2621) {
++        return 0;
++    }
++    if (v > 32767) v = 32767;
++    if (v < -32768) v = -32768;
++    return (Sint16)v;
++}
++
++static void KJ_Update(SDL_Joystick *joystick)
++{
++    Uint64 now = SDL_GetTicksNS();
++    Uint8 hat = SDL_HAT_CENTERED;
++    u64 held;
++    HidAnalogStickState left, right;
++    int i;
++    padUpdate(&kj_pad);
++    held = padGetButtons(&kj_pad);
++    for (i = 0; i < KJ_BUTTONS; i++) {
++        SDL_SendJoystickButton(now, joystick, (Uint8)i, (held & kj_bits[i]) != 0);
++    }
++    if (held & HidNpadButton_Up) hat |= SDL_HAT_UP;
++    if (held & HidNpadButton_Right) hat |= SDL_HAT_RIGHT;
++    if (held & HidNpadButton_Down) hat |= SDL_HAT_DOWN;
++    if (held & HidNpadButton_Left) hat |= SDL_HAT_LEFT;
++    SDL_SendJoystickHat(now, joystick, 0, hat);
++    left = padGetStickPos(&kj_pad, 0);
++    right = padGetStickPos(&kj_pad, 1);
++    SDL_SendJoystickAxis(now, joystick, 0, KJ_Axis(left.x, false));
++    SDL_SendJoystickAxis(now, joystick, 1, KJ_Axis(left.y, true));
++    SDL_SendJoystickAxis(now, joystick, 2, KJ_Axis(right.x, false));
++    SDL_SendJoystickAxis(now, joystick, 3, KJ_Axis(right.y, true));
++}
++
++static void KJ_Close(SDL_Joystick *joystick) {}
++static void KJ_Quit(void) {}
++static bool KJ_GetGamepadMapping(int device_index, SDL_GamepadMapping *out) { return false; }
++
++SDL_JoystickDriver SDL_KAIHEN_JoystickDriver = {
++    KJ_Init,
++    KJ_GetCount,
++    KJ_Detect,
++    KJ_IsDevicePresent,
++    KJ_GetDeviceName,
++    KJ_GetDevicePath,
++    KJ_GetDeviceSteamVirtualGamepadSlot,
++    KJ_GetDevicePlayerIndex,
++    KJ_SetDevicePlayerIndex,
++    KJ_GetDeviceGUID,
++    KJ_GetDeviceInstanceID,
++    KJ_Open,
++    KJ_Rumble,
++    KJ_RumbleTriggers,
++    KJ_SetLED,
++    KJ_SendEffect,
++    KJ_SetSensorsEnabled,
++    KJ_Update,
++    KJ_Close,
++    KJ_Quit,
++    KJ_GetGamepadMapping
++};
++
++#endif // SDL_JOYSTICK_KAIHEN
+diff --git sdl3-orig/src/thread/pthread/SDL_systhread.c sdl3/src/thread/pthread/SDL_systhread.c
+index f4d4c4d87..014ead0d9 100644
 --- sdl3-orig/src/thread/pthread/SDL_systhread.c
 +++ sdl3/src/thread/pthread/SDL_systhread.c
-@@ -187,8 +187,8 @@
+@@ -187,8 +187,8 @@ SDL_ThreadID SDL_GetCurrentThreadID(void)
  
  bool SDL_SYS_SetThreadPriority(SDL_ThreadPriority priority)
  {
@@ -118,9 +524,11 @@
      return true;
  #else
      struct sched_param sched;
+diff --git sdl3-orig/src/time/unix/SDL_systime.c sdl3/src/time/unix/SDL_systime.c
+index a3c6b31fc..0431d5274 100644
 --- sdl3-orig/src/time/unix/SDL_systime.c
 +++ sdl3/src/time/unix/SDL_systime.c
-@@ -194,7 +194,10 @@
+@@ -194,7 +194,10 @@ bool SDL_TimeToDateTime(SDL_Time ticks, SDL_DateTime *dt, bool localTime)
           * The notable exception is Solaris, where the timezone offset must still be retrieved in the strictly POSIX.1-2008
           * compliant way.
           */

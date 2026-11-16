@@ -1,6 +1,6 @@
 # The Switch 2 devkit's platform settings, then this port's (kaihen/cmake/kaihen.cmake).
-# HBX_SWITCH2 keeps this port's Switch 2 code paths; MKW_KAIHEN marks where kaiHEN differs from the
-# HBLauncher (Linux) build. _GNU_SOURCE: newlib hides POSIX declarations (fdopen, ...) under strict
+# HBX_SWITCH2 turns on the runtime's Switch 2 code paths; MKW_KAIHEN marks the kaiHEN ones among them.
+# _GNU_SOURCE: newlib hides POSIX declarations (fdopen, ...) under strict
 # -std= modes otherwise. -fno-semantic-interposition: the devkit builds with -fPIC, under which GCC
 # won't inline (even always_inline) functions it thinks the link could replace; nothing is.
 include("$ENV{DEVKITPRO}/libounce/cmake/Platform/NintendoSwitch.cmake")

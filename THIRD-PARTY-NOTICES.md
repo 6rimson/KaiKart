@@ -71,6 +71,15 @@ The runtime's Riivolution patch handling is a port of Dolphin's
 (both marked `SPDX-License-Identifier: GPL-2.0-or-later`).
 Source: <https://github.com/dolphin-emu/dolphin>
 
+### Twilight Princess HBLauncher integration - MIT
+
+Copyright (c) 2026 RavensClawX and contributors.
+Source: <https://github.com/ravensclawx/TwilightPrincess-HBLauncher>, license at
+`kaihen/patches/LICENSE.tp-integration`. Parts of `kaihen/patches/dawn-kaihen.diff` and
+`kaihen/patches/aurora-kaihen.diff` come from that port's Dawn and aurora patches for Switch 2, and
+the SDL3 audio and controller drivers in `kaihen/patches/sdl3-kaihen.diff` follow the layout of its
+SDL drivers.
+
 ### pugixml - MIT
 
 Copyright (c) 2006-2025 Arseny Kapoulkine.

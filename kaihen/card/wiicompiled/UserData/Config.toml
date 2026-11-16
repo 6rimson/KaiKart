@@ -1,0 +1,9 @@
+[video]
+widescreen = true
+resolution_multiplier = 1.0
+graphics_api = "auto"
+gx_worker = true
+
+[paths]
+dvd_root = "/disc/DATA"
+retro_rewind_root = "/RetroRewind/RetroRewind6"

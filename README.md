@@ -1,12 +1,16 @@
 # WiiCompiled for Switch 2 (unofficial fork)
 
-This fork runs WiiCompiled with Retro Rewind on the Nintendo Switch 2 through
-[HBLauncher](https://github.com/ravensclawx/HBLauncher). It's an experimental project,
+This fork runs WiiCompiled with Retro Rewind on the Nintendo Switch 2, as a homebrew app started
+from hbmenu under [kaiHEN](https://github.com/ouncebrew/kaihen). It's an experimental project,
 shared as is for anyone who wants to try it or build on it. It isn't an official WiiCompiled
 project, so please don't report its problems to the WiiCompiled team.
 
-**Start here: [hblauncher/README.md](hblauncher/README.md)** for what works, known issues and
-setup. You need your own Mario Kart Wii PAL disc, and nothing from the game is in this repository.
+**Start here: [kaihen/README.md](kaihen/README.md)** for what works, known issues and setup. You
+need your own Mario Kart Wii PAL disc, and nothing from the game is in this repository.
+
+The older version for [HBLauncher](https://github.com/ravensclawx/HBLauncher) is on the
+[`switch2-hblauncher`](https://github.com/6rimson/WiiCompiled-Switch2/tree/switch2-hblauncher)
+branch.
 
 The original WiiCompiled README follows.
 
