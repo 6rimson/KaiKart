@@ -20,7 +20,8 @@ branch.
 
 ## Status
 
-Tested with kaiHEN `20261114d` and the devkit at `f347815` (November 2026), on one Switch 2.
+Tested with kaiHEN `20261114d` and `20261116` and the devkit at `f347815` (November 2026), on one
+Switch 2.
 Includes Retro Rewind 6.13.5; plain Mario Kart Wii also builds and runs. PAL disc only.
 
 ## What works
@@ -35,13 +36,16 @@ Includes Retro Rewind 6.13.5; plain Mario Kart Wii also builds and runs. PAL dis
 - **Raised memory and GPU clocks need a charger.** On battery, the console halves the CPU's real
   speed when memory or the GPU run above their own rates. So the port runs them as you chose only
   while plugged in, and at the system's rates on battery; the CPU keeps its rate either way.
-- **Each launch spends about 25-30 seconds rebuilding saved shaders** on the title screen. New
+- **Each launch spends about 15-20 seconds setting up its saved shaders** on the title screen. New
   places also stutter the first time while their shaders build; they're saved after that.
 - **Opening the game a second time in one kaiHEN session crashes** ("the software needed to
   close"). Return to hbmenu works, and other apps open fine after it, but restart kaiHEN before
   opening the game again.
 - **Returning to hbmenu after playing online can crash.** It happens after the game has closed,
   so your progress is already saved.
+- **A thin black line can show below the race minimap** at some resolutions (1× and 2×, not 1.5×).
+  It's an upstream WiiCompiled bug,
+  [patchzyy/Wiicompiled#397](https://github.com/patchzyy/Wiicompiled/issues/397).
 - **Change the resolution outside races.** Changing it during a race can break the graphics until
   you restart the game.
 - **Retro Rewind updates need a rebuild** (`kaihen/run.sh translate` and `build`) when they change

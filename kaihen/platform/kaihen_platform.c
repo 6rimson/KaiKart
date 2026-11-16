@@ -388,6 +388,7 @@ int kaihen_return_requested(void) { return g_return_requested; }
 static volatile int g_returning;
 static int g_exit_fd = -1; /* UserData/Logs/exit.txt while returning (step) */
 static void step(const char *name);
+static void vulkan_finish(void);
 static Thread g_watchdog;
 
 void kaihen_return_to_hbmenu(void) {
@@ -399,6 +400,7 @@ void kaihen_return_to_hbmenu(void) {
     threadClose(&g_watchdog);
     power_close();
     hbxl_cpu_clock_restore();
+    vulkan_finish();
     fprintf(stderr, "[kaihen] returning to hbmenu\n");
     profiler_finish();
     fflush(NULL);
@@ -535,6 +537,13 @@ void userAppInit(void) {
     /* SDL draws nothing itself (aurora presents through Dawn to the NWindow), so its offscreen
      * video driver. settings.env wins. */
     setenv("SDL_VIDEO_DRIVER", "offscreen", 0);
+    /* Compiled shaders are cached by Dawn (UserData/Cache/dawn_cache.db), which hands each pipeline's
+     * shaders to the driver when it creates the pipeline. OunceVK's own cache
+     * (sdmc:/config/ouncevk/shader-cache) then saved all of them again, about 8,000 shaders it already
+     * had, on every launch: minutes of card writes that slowed the menus until a race had started, a
+     * store that grew without end (79,453 records for 6,122 shaders) and a queue lost at each exit.
+     * With Dawn's cache doing the work, the driver's is off. settings.env wins. */
+    setenv("MESA_SHADER_CACHE_DISABLE", "true", 0);
     if (chdir(KAIHEN_ROOT) != 0)
         fprintf(stderr, "[kaihen] no %s on the card (%d)\n", KAIHEN_ROOT, errno);
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
@@ -653,8 +662,106 @@ void *hbx_switch2_vi_window(void) {
 }
 
 /* Dawn's Switch path asks the driver for its entry point the way Mesa's ICD exports it. */
+/* The Vulkan instance at a return to hbmenu. Dawn destroys its device but keeps the instance, so the
+ * driver was never shut down: with its shader cache on, its writer threads were left mid-write.
+ * The instance is followed here and destroyed at a return, while the screen is already off, on a
+ * thread of its own: the return waits at most kFinishSeconds for it. */
+static VkInstance g_vk_instance;
+static int g_vk_devices;
+static PFN_vkDestroyInstance g_vk_destroy_instance;
+static PFN_vkCreateDevice g_vk_create_device;
+static PFN_vkDestroyDevice g_vk_destroy_device;
+static PFN_vkGetDeviceProcAddr g_vk_get_device_proc_addr;
+
+static VkResult VKAPI_CALL kaihen_vkCreateInstance(const VkInstanceCreateInfo *info, const VkAllocationCallbacks *allocator,
+                                                   VkInstance *out) {
+    const PFN_vkCreateInstance create = (PFN_vkCreateInstance)vkGetInstanceProcAddr(NULL, "vkCreateInstance");
+    const VkResult result = create(info, allocator, out);
+    if (result == VK_SUCCESS && !g_vk_instance) {
+        g_vk_instance = *out;
+        g_vk_destroy_instance = (PFN_vkDestroyInstance)vkGetInstanceProcAddr(*out, "vkDestroyInstance");
+        g_vk_create_device = (PFN_vkCreateDevice)vkGetInstanceProcAddr(*out, "vkCreateDevice");
+        g_vk_destroy_device = (PFN_vkDestroyDevice)vkGetInstanceProcAddr(*out, "vkDestroyDevice");
+        g_vk_get_device_proc_addr = (PFN_vkGetDeviceProcAddr)vkGetInstanceProcAddr(*out, "vkGetDeviceProcAddr");
+    }
+    return result;
+}
+
+static void VKAPI_CALL kaihen_vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks *allocator) {
+    if (instance == g_vk_instance)
+        g_vk_instance = VK_NULL_HANDLE;
+    g_vk_destroy_instance(instance, allocator);
+}
+
+static VkResult VKAPI_CALL kaihen_vkCreateDevice(VkPhysicalDevice physical, const VkDeviceCreateInfo *info,
+                                                 const VkAllocationCallbacks *allocator, VkDevice *out) {
+    const VkResult result = g_vk_create_device(physical, info, allocator, out);
+    if (result == VK_SUCCESS)
+        __atomic_add_fetch(&g_vk_devices, 1, __ATOMIC_RELAXED);
+    return result;
+}
+
+static void VKAPI_CALL kaihen_vkDestroyDevice(VkDevice device, const VkAllocationCallbacks *allocator) {
+    if (device)
+        __atomic_sub_fetch(&g_vk_devices, 1, __ATOMIC_RELAXED);
+    g_vk_destroy_device(device, allocator);
+}
+
+static PFN_vkVoidFunction VKAPI_CALL kaihen_vkGetDeviceProcAddr(VkDevice device, const char *name) {
+    if (strcmp(name, "vkDestroyDevice") == 0)
+        return (PFN_vkVoidFunction)kaihen_vkDestroyDevice;
+    return g_vk_get_device_proc_addr(device, name);
+}
+
 PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char *name) {
+    if (strcmp(name, "vkGetInstanceProcAddr") == 0)
+        return (PFN_vkVoidFunction)vk_icdGetInstanceProcAddr;
+    if (strcmp(name, "vkCreateInstance") == 0)
+        return (PFN_vkVoidFunction)kaihen_vkCreateInstance;
+    if (instance && instance == g_vk_instance) {
+        if (strcmp(name, "vkDestroyInstance") == 0)
+            return (PFN_vkVoidFunction)kaihen_vkDestroyInstance;
+        if (strcmp(name, "vkCreateDevice") == 0)
+            return (PFN_vkVoidFunction)kaihen_vkCreateDevice;
+        if (strcmp(name, "vkDestroyDevice") == 0)
+            return (PFN_vkVoidFunction)kaihen_vkDestroyDevice;
+        if (strcmp(name, "vkGetDeviceProcAddr") == 0)
+            return (PFN_vkVoidFunction)kaihen_vkGetDeviceProcAddr;
+    }
     return vkGetInstanceProcAddr(instance, name);
+}
+
+enum { kFinishSeconds = 5 };
+
+static void vulkan_finish_thread(void *arg) {
+    (void)arg;
+    copy_thread_pointer();
+    kaihen_vkDestroyInstance(g_vk_instance, NULL);
+}
+
+/* At a return: the instance destroyed, once Dawn has destroyed its device (the instance must
+ * outlive its devices). */
+static void vulkan_finish(void) {
+    if (!g_vk_instance)
+        return;
+    if (__atomic_load_n(&g_vk_devices, __ATOMIC_RELAXED) != 0) {
+        fprintf(stderr, "[kaihen] at exit: a Vulkan device is still alive; the driver stays as it is\n");
+        return;
+    }
+    static Thread finisher;
+    const u64 start = armGetSystemTick();
+    if (R_FAILED(threadCreate(&finisher, vulkan_finish_thread, NULL, NULL, 0x40000, 0x2C, -2)) ||
+        R_FAILED(threadStart(&finisher))) {
+        fprintf(stderr, "[kaihen] at exit: could not start closing the driver\n");
+        return;
+    }
+    if (R_SUCCEEDED(waitSingleHandle(finisher.handle, (u64)kFinishSeconds * 1000000000ull))) {
+        threadClose(&finisher);
+        fprintf(stderr, "[kaihen] at exit: driver closed in %lu ms\n",
+                (unsigned long)(armTicksToNs(armGetSystemTick() - start) / 1000000));
+    } else {
+        fprintf(stderr, "[kaihen] at exit: driver still closing after %d s; returning anyway\n", kFinishSeconds);
+    }
 }
 
 /* --- memory -------------------------------------------------------------------------------- */

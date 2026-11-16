@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <condition_variable>
+#include <cstdio>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -11,6 +13,8 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -287,12 +291,241 @@ inline constexpr const char* Describe(HostReadFailure failure) noexcept {
 // Read into private storage first and publish it only after the complete host
 // range has been obtained. Callers can therefore leave a guest DMA destination
 // untouched for every failure, including a host file truncated after indexing.
+#if defined(MKW_KAIHEN)
+// kaiHEN: game files on the microSD card. Opening one takes about 60 ms, and the card reads about
+// 16 MB/s, so the menu videos (THP), read straight through a few MB at a time, cost the game
+// 75-200 ms every half second: all its threads wait on a disc read. So:
+// - the last few game files stay open, with their size;
+// - a file read straight through (a read that starts where the last one ended) gets its next
+//   piece read ahead by a background thread, and the game's next read takes it from memory.
+// The disc's files never change while the game runs.
+namespace OpenGameFiles {
+inline constexpr size_t kMaxOpen = 8;
+inline constexpr size_t kBufferBytes = 64 * 1024;
+inline constexpr uint64_t kMinAhead = 256 * 1024;
+inline constexpr uint64_t kMaxAhead = 8 * 1024 * 1024;
+
+struct File {
+    std::string path;
+    std::FILE* file = nullptr;
+    uint64_t size = 0;
+    uint64_t lastUse = 0;
+    uint64_t lastEnd = UINT64_MAX;  // where the last read ended
+};
+
+// One piece being read ahead, or read: for the file that is being read straight through.
+struct Ahead {
+    enum class State { Empty, Wanted, Reading, Ready } state = State::Empty;
+    std::string path;
+    uint64_t offset = 0;
+    uint64_t length = 0;
+    std::vector<uint8_t> data;
+};
+
+struct Shared {
+    std::mutex lock;
+    std::condition_variable changed;
+    std::vector<File> files;
+    Ahead ahead;
+    bool workerStarted = false;
+};
+
+inline Shared& State() {
+    static Shared shared;
+    return shared;
+}
+
+inline std::FILE* OpenBuffered(const std::string& path, uint64_t& size) {
+    std::FILE* handle = std::fopen(path.c_str(), "rb");
+    if (!handle) {
+        return nullptr;
+    }
+    std::setvbuf(handle, nullptr, _IOFBF, kBufferBytes);
+    const off_t end = fseeko(handle, 0, SEEK_END) == 0 ? ftello(handle) : -1;
+    if (end < 0) {
+        std::fclose(handle);
+        return nullptr;
+    }
+    size = static_cast<uint64_t>(end);
+    return handle;
+}
+
+// Under the lock: the open file for a path, opened (and the least recently used one closed) if needed.
+inline File* Get(const std::filesystem::path& hostPath) {
+    static uint64_t uses = 0;
+    std::vector<File>& files = State().files;
+    const std::string path = hostPath.string();
+    for (File& file : files) {
+        if (file.path == path) {
+            file.lastUse = ++uses;
+            return &file;
+        }
+    }
+    uint64_t size = 0;
+    std::FILE* handle = OpenBuffered(path, size);
+    if (!handle) {
+        return nullptr;
+    }
+    if (files.size() >= kMaxOpen) {
+        auto oldest = std::min_element(files.begin(), files.end(),
+                                       [](const File& a, const File& b) { return a.lastUse < b.lastUse; });
+        std::fclose(oldest->file);
+        files.erase(oldest);
+    }
+    files.push_back(File{path, handle, size, ++uses});
+    return &files.back();
+}
+
+// The read-ahead thread, with handles of its own so it never moves the game's file positions. It
+// reads without the lock, so the game's other reads go on meanwhile.
+inline void Worker() {
+    Shared& shared = State();
+    std::string openPath;
+    std::FILE* handle = nullptr;
+    std::unique_lock<std::mutex> lock(shared.lock);
+    for (;;) {
+        shared.changed.wait(lock, [&] { return shared.ahead.state == Ahead::State::Wanted; });
+        Ahead& ahead = shared.ahead;
+        ahead.state = Ahead::State::Reading;
+        const std::string path = ahead.path;
+        const uint64_t offset = ahead.offset;
+        const uint64_t length = ahead.length;
+        lock.unlock();
+        std::vector<uint8_t> data(length);
+        bool ok = true;
+        if (path != openPath) {
+            if (handle) {
+                std::fclose(handle);
+            }
+            uint64_t size = 0;
+            handle = OpenBuffered(path, size);
+            openPath = handle ? path : std::string();
+        }
+        ok = handle && fseeko(handle, static_cast<off_t>(offset), SEEK_SET) == 0 &&
+             std::fread(data.data(), 1, length, handle) == length;
+        if (handle && !ok) {
+            std::clearerr(handle);
+        }
+        lock.lock();
+        if (ahead.state == Ahead::State::Reading && ahead.path == path && ahead.offset == offset) {
+            if (ok) {
+                ahead.data = std::move(data);
+                ahead.state = Ahead::State::Ready;
+            } else {
+                ahead.state = Ahead::State::Empty;
+            }
+        }
+        shared.changed.notify_all();
+    }
+}
+
+// Under the lock: asks for the piece after a read of a file being read straight through.
+inline void ReadAhead(const File& file, uint64_t length) {
+    Shared& shared = State();
+    if (file.lastEnd >= file.size) {
+        return;
+    }
+    const uint64_t want = std::min(std::max<uint64_t>(length, kMinAhead), kMaxAhead);
+    Ahead& ahead = shared.ahead;
+    if (ahead.state == Ahead::State::Reading) {
+        return;  // one at a time; the next read asks again
+    }
+    ahead.state = Ahead::State::Wanted;
+    ahead.path = file.path;
+    ahead.offset = file.lastEnd;
+    ahead.length = std::min(want, file.size - file.lastEnd);
+    ahead.data.clear();
+    if (!shared.workerStarted) {
+        shared.workerStarted = true;
+        std::thread(Worker).detach();
+    }
+    shared.changed.notify_all();
+}
+
+// Under the lock: copies [offset, offset + length) out of the piece read ahead, waiting for it if
+// it is still being read. False when the piece doesn't hold the whole range.
+inline bool TakeAhead(std::unique_lock<std::mutex>& lock, const std::string& path, uint64_t offset,
+                      uint32_t length, std::vector<uint8_t>& out) {
+    Shared& shared = State();
+    Ahead& ahead = shared.ahead;
+    const auto covers = [&] {
+        return ahead.state != Ahead::State::Empty && ahead.path == path && offset >= ahead.offset &&
+               offset + length <= ahead.offset + ahead.length;
+    };
+    if (!covers()) {
+        return false;
+    }
+    shared.changed.wait(lock, [&] {
+        return ahead.state == Ahead::State::Ready || ahead.state == Ahead::State::Empty || !covers();
+    });
+    if (ahead.state != Ahead::State::Ready || !covers()) {
+        return false;
+    }
+    const auto begin = ahead.data.begin() + static_cast<std::ptrdiff_t>(offset - ahead.offset);
+    out.assign(begin, begin + length);
+    return true;
+}
+} // namespace OpenGameFiles
+#endif
+
 inline bool ReadExact(const std::filesystem::path& hostPath,
                       uint64_t offset,
                       uint32_t length,
                       std::vector<uint8_t>& destination,
                       HostReadFailure& failure) {
     failure = HostReadFailure::None;
+#if defined(MKW_KAIHEN)
+    {
+        OpenGameFiles::Shared& shared = OpenGameFiles::State();
+        std::unique_lock<std::mutex> lock(shared.lock);
+        OpenGameFiles::File* file = OpenGameFiles::Get(hostPath);
+        if (!file) {
+            failure = HostReadFailure::MissingFile;
+            return false;
+        }
+        if (offset >= file->size) {
+            failure = HostReadFailure::BadOffset;
+            return false;
+        }
+        if (static_cast<uint64_t>(length) > file->size - offset) {
+            failure = HostReadFailure::ShortRead;
+            return false;
+        }
+        const std::string path = file->path;
+        const bool straight = offset == file->lastEnd;
+        std::vector<uint8_t> staged;
+        if (!OpenGameFiles::TakeAhead(lock, path, offset, length, staged)) {
+            // The lock was let go while waiting: the open file may have been closed meanwhile.
+            file = OpenGameFiles::Get(hostPath);
+            if (!file) {
+                failure = HostReadFailure::MissingFile;
+                return false;
+            }
+            staged.resize(length);
+            if (fseeko(file->file, static_cast<off_t>(offset), SEEK_SET) != 0) {
+                failure = HostReadFailure::BadOffset;
+                return false;
+            }
+            if (length != 0 && std::fread(staged.data(), 1, length, file->file) != length) {
+                std::clearerr(file->file);
+                failure = HostReadFailure::ShortRead;
+                return false;
+            }
+        } else {
+            file = OpenGameFiles::Get(hostPath);
+            if (!file) {
+                failure = HostReadFailure::MissingFile;
+                return false;
+            }
+        }
+        file->lastEnd = offset + length;
+        if (straight && length != 0) {
+            OpenGameFiles::ReadAhead(*file, length);
+        }
+        destination = std::move(staged);
+        return true;
+    }
+#endif
 
     std::ifstream file(hostPath, std::ios::binary);
     if (!file.is_open()) {
