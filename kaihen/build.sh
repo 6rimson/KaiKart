@@ -169,7 +169,7 @@ build() {
   local title="WiiCompiled" icon="/host/kaihen/icon-$PRODUCT.jpg"
   [[ "$PRODUCT" == RetroRewind ]] && title="Retro Rewind"
   [[ -f "$icon" ]] || icon="/host/kaihen/icons/$PRODUCT.jpg"
-  nacptool --create "$title" "6rimson" "${KAIHEN_VERSION:-0.3.0}" "$OUT/$PRODUCT.nacp"
+  nacptool --create "$title" "6rimson" "${KAIHEN_VERSION:-0.3.1}" "$OUT/$PRODUCT.nacp"
   elf2nro "$elf" "/dist/$PRODUCT.nro" --nacp="$OUT/$PRODUCT.nacp" --icon="$icon"
   ls -la "/dist/$PRODUCT.nro"
   # kaihen/dist/card: the card's layout without your game files, to copy onto a card by hand
