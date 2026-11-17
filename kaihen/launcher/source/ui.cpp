@@ -108,6 +108,30 @@ int Ascent(int size) {
     return int(std::lround(ascent * stbtt_ScaleForPixelHeight(&g_font, float(size))));
 }
 
+// The drawn pixels of `text` relative to its pen start and baseline: x from left to right, y from
+// top to bottom (negative above the baseline). False when nothing is drawn.
+bool InkBox(int size, const std::string& text, int& left, int& right, int& top, int& bottom) {
+    bool any = false;
+    int pen = 0;
+    for (const uint32_t cp : Decode(text)) {
+        const Glyph& glyph = GetGlyph(size, cp);
+        // The glyph's box can carry faint edge columns and rows; only clearly drawn pixels count.
+        for (int row = 0; row < glyph.height; ++row) {
+            for (int col = 0; col < glyph.width; ++col) {
+                if (glyph.coverage[size_t(row) * glyph.width + col] < 96) continue;
+                const int x = pen + glyph.x_offset + col, y = glyph.y_offset + row;
+                left = any ? std::min(left, x) : x;
+                right = any ? std::max(right, x + 1) : x + 1;
+                top = any ? std::min(top, y) : y;
+                bottom = any ? std::max(bottom, y + 1) : y + 1;
+                any = true;
+            }
+        }
+        pen += glyph.advance;
+    }
+    return any;
+}
+
 // Rows of a rounded rectangle: how far each row's ends are pulled in by the corners.
 int Inset(int row, int h, int radius) {
     const int from_edge = std::min(row, h - 1 - row);
@@ -224,6 +248,11 @@ void Text(int x, int y, int size, Color color, const std::string& text) {
     }
 }
 
+void BoldText(int x, int y, int size, Color color, const std::string& text) {
+    Text(x, y, size, color, text);
+    Text(x + 1, y, size, color, text);
+}
+
 int TextWidth(int size, const std::string& text) {
     if (!g_font_ready) return 0;
     int width = 0;
@@ -266,8 +295,16 @@ int ButtonHint(int x, int y, const char* button, const std::string& label) {
     constexpr int kSize = 22, kDiameter = 30;
     const Color circle = Rgb(226, 227, 230);
     RoundRect(x, y, kDiameter, kDiameter, kDiameter / 2, circle);
-    const int letter = TextWidth(kSize, button);
-    Text(x + (kDiameter - letter) / 2, y + 3, kSize, Rgb(32, 33, 36), button);
+    // The letter centred by its drawn shape, not its advance and line height: those leave room
+    // after the glyph and below the baseline, which pulls it left and up.
+    int left = 0, right = 0, top = 0, bottom = 0;
+    if (InkBox(kSize, button, left, right, top, bottom)) {
+        // B's bowls make it look left of centre when measured centred: one pixel right, by eye.
+        const int nudge = std::strcmp(button, "B") == 0 ? 1 : 0;
+        const int pen = x + int(std::lround((kDiameter - left - right) / 2.0)) + nudge;
+        const int baseline = y + int(std::lround((kDiameter - top - bottom) / 2.0));
+        Text(pen, baseline - Ascent(kSize), kSize, Rgb(32, 33, 36), button);
+    }
     Text(x + kDiameter + 10, y + 3, kSize, Rgb(210, 211, 214), label);
     return kDiameter + 10 + TextWidth(kSize, label);
 }

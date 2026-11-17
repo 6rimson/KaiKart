@@ -137,7 +137,7 @@ bool g_ready[kGameCount];
 
 void Header() {
     ui::Begin();
-    ui::Text(kMargin, 40, 52, kWhite, "KaiKart");
+    ui::BoldText(kMargin, 40, 52, kWhite, "KaiKart");
     const std::string version = "v" KAIKART_VERSION;
     ui::Text(ui::kWidth - kMargin - ui::TextWidth(24, version), 58, 24, kGrey, version);
     ui::Rect(kMargin, 108, ui::kWidth - 2 * kMargin, 2, kLine);
@@ -164,7 +164,7 @@ void DrawMenu(int selected, const std::string& message) {
         } else {
             ui::RoundRect(kMargin + 18, y + 14, 112, 112, 12, kLine);
         }
-        ui::Text(kMargin + 156, y + 30, 36, kWhite, kGames[i].title);
+        ui::BoldText(kMargin + 156, y + 30, 36, kWhite, kGames[i].title);
         ui::Text(kMargin + 156, y + 82, 24, g_ready[i] ? kGreen : kGrey, g_status[i]);
     }
     const char* rows[] = {"Check for updates", "Return to hbmenu"};
@@ -186,7 +186,7 @@ void DrawMenu(int selected, const std::string& message) {
 void DrawPage(const std::string& title, const std::string& body, ui::Color color,
               const std::vector<std::pair<const char*, std::string>>& hints) {
     Header();
-    ui::Text(kMargin, 170, 40, kWhite, title);
+    ui::BoldText(kMargin, 170, 40, kWhite, title);
     ui::WrapText(kMargin, 240, ui::kWidth - 2 * kMargin, 28, color, body);
     Footer(hints);
     ui::End();
@@ -199,7 +199,7 @@ constexpr const char* kDownloadNote = "Keep the console on and the card in.";
 // A problem: what happened in red, what to do in the normal text colour, B to go back.
 void DrawError(const std::string& title, const std::string& detail, const std::string& advice) {
     Header();
-    ui::Text(kMargin, 170, 40, kWhite, title);
+    ui::BoldText(kMargin, 170, 40, kWhite, title);
     const int width = ui::kWidth - 2 * kMargin;
     const int used = ui::WrapText(kMargin, 240, width, 28, kRed, detail);
     ui::WrapText(kMargin, 240 + used + 18, width, 28, kStepText, advice);
@@ -225,7 +225,7 @@ void DrawProgress(const char* title, kaikart::Progress& progress, const char* no
     }
     Header();
     const int width = ui::kWidth - 2 * kMargin;
-    ui::Text(kMargin, 170, 40, kWhite, title);
+    ui::BoldText(kMargin, 170, 40, kWhite, title);
     ui::Text(kMargin, 244, 28, kStepText, step);
     if (!detail.empty()) ui::Text(kMargin, 284, 24, kGrey, detail);
     if (fraction >= 0) {
@@ -547,7 +547,7 @@ int main(int argc, char** argv) {
     }
     if (starting || restarting) {
         Header();
-        ui::Text(kMargin, 170, 40, kWhite,
+        ui::BoldText(kMargin, 170, 40, kWhite,
                  restarting ? std::string("Starting the new KaiKart...") : std::string("Starting ") + kGames[selected].title + "...");
         Footer({});
         ui::End();

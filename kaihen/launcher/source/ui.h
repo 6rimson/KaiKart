@@ -35,6 +35,9 @@ void DrawImage(const Image& image, int x, int y, int w, int h);  // scaled to w 
 
 // Text: `y` is the top of the line, `size` its pixel height.
 void Text(int x, int y, int size, Color color, const std::string& text);
+// The same, a pixel heavier: for titles (the system font is light, and a thin stroke such as the
+// "i" spread over two pixel columns looks faint at large sizes).
+void BoldText(int x, int y, int size, Color color, const std::string& text);
 int TextWidth(int size, const std::string& text);
 // Text wrapped to `width` (and at '\n'); returns the height used.
 int WrapText(int x, int y, int width, int size, Color color, const std::string& text);
