@@ -3,10 +3,11 @@
 
   kaihen/run.sh sd /Volumes/CARD [--nand DIR] [--rr-save FILE] [--disc DIR] [--rr DIR] [--replace-rr]
 
-The card gets switch/<Product>.nro (hbmenu lists it) and wiicompiled/: your extracted disc, the
+The card gets switch/KaiKart.nro (the launcher, which hbmenu lists), the game build in
+wiicompiled/apps/<Product>.nro (KaiKart starts it), and in wiicompiled/: your extracted disc, the
 Retro Rewind folder, the runtime's files, settings (settings.env, UserData/Config.toml) and saves
 (UserData/NAND). Files already on the card are kept, so running it again only adds what is missing
-(and replaces the .nro). --replace-rr swaps the card's RetroRewind6 folder for yours, after a
+(and replaces the two .nro files). --replace-rr swaps the card's RetroRewind6 folder for yours, after a
 Retro Rewind update: files on the card the new version doesn't have, such as saved ghosts, are
 kept, and your Retro Rewind save is outside the folder. KAIHEN_PRODUCT=WiiCompiled puts plain Mario Kart Wii there; both share the
 wiicompiled folder.
@@ -64,6 +65,9 @@ def main():
     nro = HERE / "dist" / f"{product}.nro"
     if not nro.exists():
         raise SystemExit(f"No {nro}: run kaihen/run.sh setup (or build) first")
+    launcher = HERE / "dist" / "KaiKart.nro"
+    if not launcher.exists():
+        raise SystemExit(f"No {launcher}: run kaihen/run.sh launcher first")
     card = args.card.resolve()
     if not card.is_dir():
         raise SystemExit(f"{card} is not a mounted card")
@@ -126,19 +130,25 @@ def main():
             text.rstrip("\n") + "\n\n[paths]\n" + rr_root
         config.write_text(text)
 
-    # The app last, through a temporary name: a copy that fails (a full card) leaves no broken
-    # .nro for hbmenu to list, and the previous one stays.
-    switch = card / "switch"
-    switch.mkdir(exist_ok=True)
-    partial = switch / (nro.name + ".partial")
-    try:
-        shutil.copyfile(nro, partial)
-        partial.replace(switch / nro.name)
-    except OSError as error:
-        partial.unlink(missing_ok=True)
-        raise SystemExit(f"Couldn't copy {nro.name} to the card: {error.strerror}")
-    print(f"Copied {nro.name} to {switch}. Eject the card, then start it from hbmenu.")
+    # The apps last, each through a temporary name: a copy that fails (a full card) leaves no broken
+    # .nro behind, and the previous one stays.
+    def install(source, folder):
+        folder.mkdir(parents=True, exist_ok=True)
+        partial = folder / (source.name + ".partial")
+        try:
+            shutil.copyfile(source, partial)
+            partial.replace(folder / source.name)
+        except OSError as error:
+            partial.unlink(missing_ok=True)
+            raise SystemExit(f"Couldn't copy {source.name} to the card: {error.strerror}")
 
+    install(nro, root / "apps")
+    install(launcher, card / "switch")
+    print(f"Copied {nro.name} to {root / 'apps'} and KaiKart.nro to {card / 'switch'}.")
+    old = card / "switch" / nro.name
+    if old.exists():
+        print(f"{old} is from before KaiKart and no longer updated; you can delete it.")
+    print("Eject the card, then open KaiKart from hbmenu.")
 
 if __name__ == "__main__":
     main()

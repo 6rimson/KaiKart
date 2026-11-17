@@ -13,7 +13,7 @@
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #define STBTT_STATIC
-#include "imstb_truetype.h"  // stb_truetype, as Dear ImGui carries it (kaihen/build.sh points at it)
+#include "imstb_truetype.h"  // stb_truetype, as Dear ImGui carries it (kaihen/docker/build.sh points at it)
 
 namespace ui {
 namespace {

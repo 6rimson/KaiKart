@@ -1,7 +1,8 @@
 #!/bin/bash
-# Runs in the ounce-devkit-clang (or ounce-devkit) image, from kaihen/run.sh. /host: the repository
-# (read only except for sources and translate); /opt/work: the work volume (Dawn and SDL3 in deps/,
-# the translated game in src/); /opt/kaihen: the build volume; /dist: kaihen/dist on the host.
+# Runs inside Docker, in the ounce-devkit-clang (or ounce-devkit) image, started by kaihen/run.sh.
+# /host: the repository (read only except for sources and translate); /opt/work: the work volume
+# (Dawn and SDL3 in deps/, the translated game in src/); /opt/kaihen: the build volume; /dist:
+# kaihen/dist on the host.
 set -euo pipefail
 PRODUCT="${KAIHEN_PRODUCT:-RetroRewind}"
 COMPILER="${KAIHEN_COMPILER:-clang}"

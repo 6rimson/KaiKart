@@ -521,7 +521,7 @@ int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(
 
 /* --- the card's own files ----------------------------------------------------------------------- */
 /* The app carries the small files the wiicompiled folder needs (romfs:/wiicompiled, staged by
- * kaihen/build.sh): settings, Config.toml, the runtime's DSP coefficients and certificates, the Wii
+ * kaihen/docker/build.sh): settings, Config.toml, the runtime's DSP coefficients and certificates, the Wii
  * bootstrap files. A card that has only the app and a disc image gets them at its first launch.
  * Files already on the card are kept, except the runtime's own two, which follow the app. */
 #include <dirent.h>

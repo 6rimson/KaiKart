@@ -16,7 +16,7 @@
 #include <cryptopp/sha.h>
 #include <imgui.h>
 
-// The Retro Rewind release this build's translation was made from (kaihen/build.sh writes it).
+// The Retro Rewind release this build's translation was made from (kaihen/docker/build.sh writes it).
 #if __has_include("kaihen_build_info.h")
 #include "kaihen_build_info.h"
 #endif

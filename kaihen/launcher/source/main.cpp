@@ -21,7 +21,7 @@
 #include "kaikart_install.h"
 #include "ui.h"
 
-// The Retro Rewind release the Retro Rewind build is made for (kaihen/build.sh writes it).
+// The Retro Rewind release the Retro Rewind build is made for (kaihen/docker/build.sh writes it).
 #if __has_include("kaihen_build_info.h")
 #include "kaihen_build_info.h"
 #endif

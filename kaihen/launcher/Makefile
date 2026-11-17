@@ -47,7 +47,7 @@ ICON		:=	../icons/WiiCompiled.jpg
 BUILD		:=	build
 SOURCES		:=	source ../shared
 DATA		:=	data
-# From kaihen/build.sh (launcher): the games' mbed TLS 3.6 (built with kaihen_mbedtls_config.h, the
+# From kaihen/docker/build.sh (launcher): the games' mbed TLS 3.6 (built with kaihen_mbedtls_config.h, the
 # CPU's AES instructions; absolute paths). build.sh stages generated/kaihen_build_info.h and romfs/
 # (the card's small files) next to this Makefile.
 KAIKART_MBEDTLS_INCLUDE	?=

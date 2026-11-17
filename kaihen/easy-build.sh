@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds the kaiHEN app from your own disc and puts it on a microSD card (Apple Silicon Mac).
+# Builds KaiKart and a game from your own disc and puts them on a microSD card (Apple Silicon Mac).
 # Run it in Terminal: kaihen/easy-build.sh (or drag this file into a Terminal window and press
 # Return). It asks for your disc, your Retro Rewind folder and the card, then runs the steps in
 # kaihen/README.md. Run it again at any time: steps already done are skipped, so it also picks up
@@ -36,9 +36,9 @@ except ValueError:
 print(parts[0] if parts else "")' "$1"
 }
 
-printf '\033]0;WiiCompiled for kaiHEN\007'
-bold "WiiCompiled for kaiHEN"
-note "This builds the app from your own disc and puts it on your microSD card."
+printf '\033]0;KaiKart\007'
+bold "KaiKart"
+note "This builds KaiKart and a game from your own disc and puts them on your microSD card."
 note "The first build takes an hour or two. You can stop it (close the window) and run this again."
 
 # --- What the Mac needs -------------------------------------------------------------------------
@@ -75,7 +75,7 @@ fi
 note "Docker ${memory_gb} GB, ${KAIHEN_JOBS} build jobs, ${free_gb} GB free."
 
 # --- Which game -----------------------------------------------------------------------------------
-bold "Which app?"
+bold "Which game?"
 note "1) Retro Rewind (default)"
 note "2) Plain Mario Kart Wii"
 case "$(ask "Choose 1 or 2:")" in
@@ -173,10 +173,11 @@ fi
 
 # --- Build ----------------------------------------------------------------------------------------
 NRO="$REPO/kaihen/dist/$KAIHEN_PRODUCT.nro"
+LAUNCHER="$REPO/kaihen/dist/KaiKart.nro"
 bold "Building"
 build=1
-if [[ -f "$NRO" && $changed == 0 ]]; then
-  note "Already built: kaihen/dist/$KAIHEN_PRODUCT.nro."
+if [[ -f "$NRO" && -f "$LAUNCHER" && $changed == 0 ]]; then
+  note "Already built: kaihen/dist/$KAIHEN_PRODUCT.nro and KaiKart.nro."
   confirm "Build it again? (only needed after you update this repository)" || build=0
 fi
 if (( build )); then
@@ -186,7 +187,8 @@ if (( build )); then
   "$RUN" setup < /dev/null 2>&1 | tee -a "$LOG" ||
     fail "The build stopped with an error. The end of build/build-log.txt says why.
 If it mentions memory (\"Killed\", \"signal 9\"), give Docker more memory and run this again."
-  [[ -f "$NRO" ]] || fail "The build finished but kaihen/dist/$KAIHEN_PRODUCT.nro is missing; see build/build-log.txt."
+  [[ -f "$NRO" && -f "$LAUNCHER" ]] ||
+    fail "The build finished but kaihen/dist/$KAIHEN_PRODUCT.nro or KaiKart.nro is missing; see build/build-log.txt."
 fi
 
 # --- microSD card ---------------------------------------------------------------------------------
@@ -232,8 +234,8 @@ else
   note "Copying to the card (the first time takes a while)..."
   "$RUN" sd "${sd_args[@]}" || fail "Copying to the card failed (see above)."
   bold "Done"
-  note "Eject the card in Finder, put it in your Switch 2, start kaiHEN, and open"
-  note "$( retro_rewind && echo "Retro Rewind" || echo "WiiCompiled") from hbmenu."
+  note "Eject the card in Finder, put it in your Switch 2, start kaiHEN, open KaiKart from"
+  note "hbmenu and choose $( retro_rewind && echo "Retro Rewind" || echo "Mario Kart Wii")."
 fi
 printf '\nPress Return to close.'
 read -r _ || true
