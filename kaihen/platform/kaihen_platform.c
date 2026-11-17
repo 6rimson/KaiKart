@@ -519,9 +519,78 @@ int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(
     return rc;
 }
 
+/* --- the card's own files ----------------------------------------------------------------------- */
+/* The app carries the small files the wiicompiled folder needs (romfs:/wiicompiled, staged by
+ * kaihen/build.sh): settings, Config.toml, the runtime's DSP coefficients and certificates, the Wii
+ * bootstrap files. A card that has only the app and a disc image gets them at its first launch.
+ * Files already on the card are kept, except the runtime's own two, which follow the app. */
+#include <dirent.h>
+#include <limits.h>
+
+static void copy_file(const char *from, const char *to) {
+    FILE *in = fopen(from, "rb");
+    if (!in)
+        return;
+    char partial[PATH_MAX];
+    snprintf(partial, sizeof partial, "%s.partial", to);
+    FILE *out = fopen(partial, "wb");
+    if (out) {
+        char buffer[16384];
+        size_t n, failed = 0;
+        while ((n = fread(buffer, 1, sizeof buffer, in)) > 0)
+            failed |= fwrite(buffer, 1, n, out) != n;
+        failed |= fclose(out) != 0;
+        if (failed || (unlink(to), rename(partial, to)) != 0)
+            unlink(partial);
+    }
+    fclose(in);
+}
+
+static int follows_app(const char *name) {
+    return strcmp(name, "dsp_coef.bin") == 0 || strcmp(name, "cacert.pem") == 0;
+}
+
+static void copy_missing(const char *from, const char *to) {
+    DIR *dir = opendir(from);
+    if (!dir)
+        return;
+    mkdir(to, 0777);
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        char source[PATH_MAX], target[PATH_MAX];
+        snprintf(source, sizeof source, "%s/%s", from, entry->d_name);
+        snprintf(target, sizeof target, "%s/%s", to, entry->d_name);
+        struct stat in, out;
+        if (stat(source, &in) != 0)
+            continue;
+        if (S_ISDIR(in.st_mode)) {
+            copy_missing(source, target);
+            continue;
+        }
+        const int present = stat(target, &out) == 0;
+        if (present && !(follows_app(entry->d_name) && out.st_size != in.st_size))
+            continue;
+        /* settings.env replaces an older card's hbxl-env, which load_settings renames to it. */
+        if (strcmp(entry->d_name, "settings.env") == 0 && stat(KAIHEN_ROOT "/hbxl-env", &out) == 0)
+            continue;
+        copy_file(source, target);
+    }
+    closedir(dir);
+}
+
+static void card_setup(void) {
+    if (R_FAILED(romfsMountSelf("romfs")))
+        return;
+    copy_missing("romfs:/wiicompiled", KAIHEN_ROOT);
+    romfsUnmount("romfs");
+}
+
 void userAppInit(void) {
     copy_thread_pointer();
     cores_start();
+    card_setup();
     socketInitializeDefault();
     /* With nxlink -s, stdout and stderr go to the PC; otherwise to the card. */
     g_nxlink = nxlinkStdio();
@@ -1218,6 +1287,31 @@ void __wrap_exit(int status) {
 
 void __wrap__exit(int status) {
     quit_now(status == 0 ? "_exit(0)" : status == 1 ? "_exit(1)" : "_exit(failure)");
+}
+
+/* The card's file system has no permissions, and libnx's chmod and fchmod return ENOSYS. libstdc++'s
+ * std::filesystem::copy_file sets the copy's permissions before copying its data, so every copy failed
+ * and left an empty file (a new NAND's first files, NANDSafeOpen's scratch copy). Unsupported counts
+ * as done (link: --wrap=chmod, --wrap=fchmod). */
+int __real_chmod(const char *path, mode_t mode);
+int __real_fchmod(int fd, mode_t mode);
+
+int __wrap_chmod(const char *path, mode_t mode) {
+    const int result = __real_chmod(path, mode);
+    if (result != 0 && (errno == ENOSYS || errno == ENOTSUP)) {
+        errno = 0;
+        return 0;
+    }
+    return result;
+}
+
+int __wrap_fchmod(int fd, mode_t mode) {
+    const int result = __real_fchmod(fd, mode);
+    if (result != 0 && (errno == ENOSYS || errno == ENOTSUP)) {
+        errno = 0;
+        return 0;
+    }
+    return result;
 }
 
 /* libnx's pthread_detach returns ENOSYS, which std::thread::detach turns into an exception. The

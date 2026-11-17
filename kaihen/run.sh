@@ -7,6 +7,7 @@
 #   kaihen/run.sh build        build and make the .nro (kaihen/dist/)
 #   kaihen/run.sh sd /Volumes/CARD [--nand DIR] [--rr-save FILE]
 #                              put the .nro and the game's files on a microSD card (kaihen/sd.py)
+#   kaihen/run.sh release      build both apps for a release: kaihen/dist/release/ with SHA256SUMS
 # KAIHEN_PRODUCT: RetroRewind (default) or WiiCompiled (plain Mario Kart Wii).
 # KAIHEN_JOBS: parallel jobs (6 fits 8 GB of Docker memory). KAIHEN_PGO=0: no profile.
 # KAIHEN_COMPILER=gcc: the devkit's GCC instead of Clang, without PGO.
@@ -26,11 +27,30 @@ case "$KAIHEN_PRODUCT" in
   WiiCompiled) WORK="${KAIHEN_WORK:-wiicompiled-kaihen-work-mkw}" ;;
   *) echo "KAIHEN_PRODUCT is RetroRewind or WiiCompiled" >&2; exit 2 ;;
 esac
-action="${1:?usage: kaihen/run.sh setup|sources|translate|configure|build|sd|shell}"
+action="${1:?usage: kaihen/run.sh setup|sources|translate|configure|build|sd|release|shell}"
 
 if [[ "$action" == sd ]]; then
   shift
   exec python3 "$HERE/sd.py" "$@"
+fi
+# Both apps as released: the card's template folder as committed (it goes into the apps), the icons
+# in kaihen/icons (never a local icon-*.jpg), and both work volumes already translated.
+if [[ "$action" == release ]]; then
+  if [[ -n "$(git -C "$REPO" status --porcelain --ignored -- kaihen/card | grep -v '\.DS_Store$')" ]]; then
+    echo "kaihen/card has local changes or extra files; they would go into the apps. Commit or remove them first." >&2
+    exit 1
+  fi
+  version="${KAIHEN_VERSION:-$(sed -n 's/.*KAIHEN_VERSION:-\([0-9.]*\)}.*/\1/p' "$HERE/build.sh" | head -1)}"
+  out="$HERE/dist/release"
+  rm -rf "$out"
+  mkdir -p "$out"
+  for product in RetroRewind WiiCompiled; do
+    echo "== $product"
+    KAIHEN_PRODUCT=$product KAIHEN_RELEASE=1 KAIHEN_VERSION="$version" "$0" build
+    cp "$HERE/dist/$product.nro" "$out/$product-$version.nro"
+  done
+  (cd "$out" && shasum -a 256 ./*.nro | sed 's# \./# #' > SHA256SUMS && cat SHA256SUMS)
+  exit 0
 fi
 if [[ "$action" == setup ]]; then
   shift
@@ -75,5 +95,5 @@ case "$action" in sources|translate) HOST=rw WORK_MODE=rw ;; esac
 exec docker run --rm ${TTY[@]+"${TTY[@]}"} \
   -v "$REPO:/host:$HOST" -v "$WORK:/opt/work:$WORK_MODE" \
   -v "${KAIHEN_VOLUME:-wiicompiled-kaihen}:/opt/kaihen" -v "$HERE/dist:/dist" \
-  -e KAIHEN_JOBS -e KAIHEN_PRODUCT -e KAIHEN_COMPILER -e KAIHEN_PGO -e KAIHEN_VERSION \
+  -e KAIHEN_JOBS -e KAIHEN_PRODUCT -e KAIHEN_COMPILER -e KAIHEN_PGO -e KAIHEN_VERSION -e KAIHEN_RELEASE \
   "$IMAGE" bash /host/kaihen/build.sh "$@"

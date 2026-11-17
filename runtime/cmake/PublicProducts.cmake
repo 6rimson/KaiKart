@@ -85,6 +85,13 @@ if(MKW_RUNTIME_USE_PREBUILT)
     file(CONFIGURE OUTPUT "${MKW_RUNTIME_PREBUILT_STAMP}" CONTENT "${MKW_NP_RUNTIME_FINGERPRINT}\n")
 else()
     mkw_add_runtime_library(mkw_runtime_common OBJECT ${SOURCES})
+    if(MKW_KAIHEN)
+        # zlib (aurora's) unpacks the Retro Rewind download (kaihen/platform/kaihen_setup.cpp): its
+        # headers for that file only, so the rest of the runtime keeps its compile commands.
+        target_link_libraries(mkw_runtime_common PRIVATE $<LINK_ONLY:ZLIB::ZLIB>)
+        set_property(SOURCE "${MKW_RUNTIME_SOURCE_DIR}/../kaihen/platform/kaihen_setup.cpp" APPEND PROPERTY
+            INCLUDE_DIRECTORIES "$<TARGET_PROPERTY:zlib-ng,INTERFACE_INCLUDE_DIRECTORIES>")
+    endif()
 endif()
 
 add_library(mkw_game_data OBJECT ${MKW_GAME_DATA_SOURCES})

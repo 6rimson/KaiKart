@@ -71,6 +71,9 @@
 #include "wiimote_host.h"
 #include "discord_presence.h"
 #include "steam_input_layout.h"
+#if defined(MKW_KAIHEN)
+#include "../../kaihen/platform/kaihen_setup.h"
+#endif
 #include "fiber_manager.h"
 #include "gx_worker.h"
 #include "hle_stubs.h"
@@ -1506,6 +1509,10 @@ int RuntimeMain(int argc, char** argv) {
         UpdateMkwDynamicAspectSurface(auroraInfo.windowSize.native_fb_width,
                                       auroraInfo.windowSize.native_fb_height);
         settings_overlay::InitializeRuntimeSettings();
+#if defined(MKW_KAIHEN)
+        // The disc (and Retro Rewind) on a card that doesn't have them yet, before the game boots.
+        kaihen_setup::Run();
+#endif
         if (!g_headless) {
             SteamInputLayout::Initialize(RuntimeConfigFile::SteamInputOverrideEnabled(),
                                          RuntimeConfigFile::SteamInputAppId());

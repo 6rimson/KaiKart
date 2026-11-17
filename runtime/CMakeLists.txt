@@ -427,6 +427,16 @@ if(MKW_KAIHEN)
     set_source_files_properties("${MKW_KAIHEN_PLATFORM_SOURCE}" PROPERTIES
         INCLUDE_DIRECTORIES "${MKW_KAIHEN_SQLITE_DIR}"
         SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
+    # First-launch setup: the disc imported from an image on the card, and Retro Rewind's pack.
+    set(MKW_KAIHEN_SETUP_SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/kaihen_setup.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/kaihen_https.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/wii_disc_extractor.cpp")
+    list(APPEND SOURCES ${MKW_KAIHEN_SETUP_SOURCES})
+    set_source_files_properties(${MKW_KAIHEN_SETUP_SOURCES} PROPERTIES
+        SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
+    # chmod and fchmod: unsupported on the card counts as done (kaihen_platform.c).
+    add_link_options(-Wl,--wrap=chmod -Wl,--wrap=fchmod)
     # No Steam on the console: its input-layout helper (it spawns a process) is a no-op here.
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/steam_input_layout.cpp")
     list(APPEND SOURCES "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/steam_input_layout_stub.cpp")
