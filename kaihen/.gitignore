@@ -1,3 +1,7 @@
 dist/
 deps/
 icon-*.jpg
+/launcher/build/
+/launcher/*.nro
+/launcher/*.nacp
+/launcher/*.elf

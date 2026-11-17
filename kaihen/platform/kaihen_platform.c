@@ -1293,28 +1293,6 @@ void __wrap__exit(int status) {
     quit_now(status == 0 ? "_exit(0)" : status == 1 ? "_exit(1)" : "_exit(failure)");
 }
 
-/* Buttons pressed since the last call, for the screens before the game starts (kaihen_setup.cpp):
- * 1 A, 2 B, 4 Plus, 8 Minus. */
-uint32_t kaihen_setup_buttons(void) {
-    static PadState pad;
-    static int ready;
-    if (!ready) {
-        padInitializeDefault(&pad);
-        ready = 1;
-    }
-    padUpdate(&pad);
-    const u64 down = padGetButtonsDown(&pad);
-    return ((down & HidNpadButton_A) ? 1u : 0u) | ((down & HidNpadButton_B) ? 2u : 0u) |
-           ((down & HidNpadButton_Plus) ? 4u : 0u) | ((down & HidNpadButton_Minus) ? 8u : 0u);
-}
-
-/* The app's own file (hbmenu passes its path first), which an update replaces. */
-const char *kaihen_app_path(void) {
-    extern char **__system_argv;
-    extern int __system_argc;
-    return __system_argc > 0 && __system_argv && __system_argv[0] ? __system_argv[0] : "";
-}
-
 /* The card's file system has no permissions, and libnx's chmod and fchmod return ENOSYS. libstdc++'s
  * std::filesystem::copy_file sets the copy's permissions before copying its data, so every copy failed
  * and left an empty file (a new NAND's first files, NANDSafeOpen's scratch copy). Unsupported counts
