@@ -908,6 +908,7 @@ static uint32_t cpu_rate(uint32_t mhz) {
 typedef struct {
     const char *name, *setting;
     PcvModuleId module;
+    uint32_t handheld_mhz; /* the console's own rate in handheld mode, on battery */
     ClkrstSession session;
     int open;
     uint32_t launch_hz, lo, hi, chosen_mhz, applied_hz, now_hz;
@@ -979,12 +980,22 @@ static int extra_open(ExtraClock *c) {
     return 1;
 }
 
-/* Puts a clock at its chosen rate when plugged in, at the launch rate otherwise. Call with
+/* The system's rate: the launch rate, but on battery no higher than the console's handheld rate. A
+ * clock can be left raised at launch (an app closed from the HOME Menu runs none of its exit code),
+ * and on battery a raised memory or GPU clock halves the CPU's real speed. */
+static uint32_t extra_system_rate(const ExtraClock *c) {
+    if (g_plugged > 0)
+        return c->launch_hz;
+    const uint32_t handheld = extra_rate(c, c->handheld_mhz);
+    return c->launch_hz > handheld ? handheld : c->launch_hz;
+}
+
+/* Puts a clock at its chosen rate when plugged in, at the system's rate otherwise. Call with
  * g_clock_lock held. */
 static void extra_update(ExtraClock *c) {
     if (c->open <= 0)
         return;
-    const uint32_t target = c->chosen_mhz && g_plugged > 0 ? extra_rate(c, c->chosen_mhz) : c->launch_hz;
+    const uint32_t target = c->chosen_mhz && g_plugged > 0 ? extra_rate(c, c->chosen_mhz) : extra_system_rate(c);
     if (target == c->applied_hz)
         return;
     const Result rc = clkrstSetClockRate(&c->session, target);
@@ -1055,11 +1066,12 @@ static void extra_clocks_restore(void) {
         ExtraClock *c = &g_extra[i];
         if (c->open <= 0)
             continue;
-        if (c->applied_hz != c->launch_hz)
-            clkrstSetClockRate(&c->session, c->launch_hz);
+        const uint32_t system = extra_system_rate(c);
+        if (c->applied_hz != system)
+            clkrstSetClockRate(&c->session, system);
         uint32_t now = 0;
         clkrstGetClockRate(&c->session, &now);
-        fprintf(stderr, "[kaihen] at exit: %s clock back to %.1f MHz, reads %.1f\n", c->name, c->launch_hz / 1e6,
+        fprintf(stderr, "[kaihen] at exit: %s clock back to %.1f MHz, reads %.1f\n", c->name, system / 1e6,
                 now / 1e6);
         clkrstCloseSession(&c->session);
         c->open = 0;
