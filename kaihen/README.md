@@ -79,6 +79,22 @@ below from this folder.
   `xcode-select --install`), and about 40 GB of free space for the build.
 - **Your own Mario Kart Wii PAL disc (`RMCP01`)** and the latest Retro Rewind.
 
+### The easy way
+
+Run `kaihen/easy-build.sh` in Terminal (or drag the file into a Terminal window and press Return).
+It asks for:
+
+- Retro Rewind or plain Mario Kart Wii;
+- your disc (drag the file into the window);
+- your `RetroRewind6` folder;
+- your microSD card, once the build is done.
+
+It does steps 2 to 4 for you: it extracts and checks the disc, downloads the Retro WFC payload,
+builds, and copies everything to the card. If something fails, or after an update, run it again:
+it skips what's already done. The build's log is in `build/build-log.txt`.
+
+The steps below do the same by hand.
+
 ### 2. Put your files in place
 
 **Your disc.** Extract it into `Assets/DATA` with [nodtool](https://github.com/encounter/nod/releases)
