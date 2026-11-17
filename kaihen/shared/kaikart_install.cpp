@@ -210,8 +210,7 @@ bool ImportDiscImage(const fs::path& root, const fs::path& data) {
         Sha256(partial / "files" / "rel" / "StaticR.rel") != kStaticRSha256) {
         fs::remove_all(partial, error);
         Fail("This disc's game code has been changed.",
-             "Please use an unmodified Mario Kart Wii PAL disc. Texture mods can be added separately; see the KaiKart "
-             "guide.");
+             "Please use an unmodified Mario Kart Wii PAL disc.");
         return false;
     }
     fs::remove_all(data, error);  // anything left of an older, unfinished copy
