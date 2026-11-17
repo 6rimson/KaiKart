@@ -11,6 +11,7 @@
 #include "music_attenuation.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
+#include "runtime_product.h"
 #include "wiimote_host.h"
 
 #include <imgui.h>
@@ -1409,20 +1410,36 @@ void DrawStartupScreen() {
                                         ImGuiWindowFlags_NoBringToFrontOnFocus;
     if (ImGui::Begin("Wiicompiled Startup", nullptr, kFlags)) {
         ImGui::SetWindowFontScale(1.25f);
+#if defined(MKW_KAIHEN)
+        constexpr const char* kTitle = "KaiKart";
+#else
         constexpr const char* kTitle = "WiiCompiled";
+#endif
         const ImVec2 titleSize = ImGui::CalcTextSize(kTitle);
         const float titleX = std::max(0.0f, (viewport->Size.x - titleSize.x) * 0.5f);
         const float startY = std::max(0.0f, (viewport->Size.y - titleSize.y) * 0.5f);
         ImGui::SetCursorPos(ImVec2(titleX, startY));
         ImGui::TextUnformatted(kTitle);
         float nextY = startY + titleSize.y + 12.0f;
+#if defined(MKW_KAIHEN)
+        {
+            // Which game, and the project it's built on.
+            const std::string subtitle = std::string(RuntimeProduct::Active().displayName) + " · based on WiiCompiled";
+            ImGui::SetWindowFontScale(0.8f);
+            const float subtitleX = std::max(0.0f, (viewport->Size.x - ImGui::CalcTextSize(subtitle.c_str()).x) * 0.5f);
+            ImGui::SetCursorPos(ImVec2(subtitleX, nextY - 6.0f));
+            ImGui::TextDisabled("%s", subtitle.c_str());
+            ImGui::SetWindowFontScale(1.25f);
+            nextY = ImGui::GetCursorPosY() + 8.0f;
+        }
+#endif
         if (g_bootShaderNotice && !g_bootShadersReady.load(std::memory_order_relaxed)) {
             ImGui::SetWindowFontScale(0.9f);
             char line[96];
             std::snprintf(line, sizeof(line), "Compiling shaders, please hold on: %u remaining",
                           aurora_get_queued_pipeline_count());
             const float lineX = std::max(0.0f, (viewport->Size.x - ImGui::CalcTextSize(line).x) * 0.5f);
-            ImGui::SetCursorPos(ImVec2(lineX, startY + titleSize.y * 1.8f));
+            ImGui::SetCursorPos(ImVec2(lineX, nextY));
             ImGui::TextUnformatted(line);
             nextY = ImGui::GetCursorPosY() + 4.0f;
         }
@@ -2185,7 +2202,11 @@ void DrawConsoleMenu() {
     ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f, viewport->Pos.y + viewport->Size.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowBgAlpha(0.9f);
+#if defined(MKW_KAIHEN)
+    if (ImGui::Begin("KaiKart settings", nullptr,
+#else
     if (ImGui::Begin("WiiCompiled settings", nullptr,
+#endif
                      ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse |
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove)) {
         const auto row = [](int index, const std::string& text) {
