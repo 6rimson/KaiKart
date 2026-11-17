@@ -44,6 +44,8 @@ struct Release {
     std::string download_base;  // https://github.com/<repo>/releases/download/<tag>
 };
 bool VersionNewer(const std::string& a, const std::string& b);
+// Retro Rewind's newest release on its server, or empty when it can't be asked.
+std::string LatestRetroRewindVersion();
 // The display version in an .nro's NACP (what hbmenu shows), or empty.
 std::string NroVersion(const fs::path& nro);
 // The newest release of `repo` with a `name`-<version>.nro newer than `current`; found.version stays

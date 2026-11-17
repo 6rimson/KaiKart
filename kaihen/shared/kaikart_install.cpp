@@ -675,6 +675,17 @@ bool UpdateRetroRewind(const fs::path& folder) {
 
 bool VersionNewer(const std::string& a, const std::string& b) { return VersionParts(a) > VersionParts(b); }
 
+std::string LatestRetroRewindVersion() {
+    std::string versions, error, newest;
+    if (!FetchString(kVersionList, versions, error)) return {};
+    for (const auto& line : Lines(versions)) {
+        if (!VersionParts(line[0]).empty() && (newest.empty() || VersionParts(line[0]) > VersionParts(newest))) {
+            newest = line[0];
+        }
+    }
+    return newest;
+}
+
 std::string NroVersion(const fs::path& nro) {
     // NRO: "NRO0" at 0x10 and the NRO's size at 0x18; its assets follow ("ASET", then the icon's and
     // the NACP's offset and size); the NACP's display version is at 0x3060.

@@ -236,8 +236,11 @@ launcher() {
   mkdir -p "$stage/launcher/generated"
   cp "$SRC/kaihen/platform/kaihen_build_info.h" "$stage/launcher/generated/"
   card_files "$stage/launcher/romfs"
+  mkdir -p "$stage/launcher/romfs/icons"
+  cp "$SRC"/kaihen/icons/*.jpg "$stage/launcher/romfs/icons/"
   make -C "$stage/launcher" -j"$JOBS" APP_VERSION="$VERSION" \
-    KAIKART_MBEDTLS_INCLUDE="$mbedtls_include" KAIKART_MBEDTLS_LIB="$mbedtls_lib"
+    KAIKART_MBEDTLS_INCLUDE="$mbedtls_include" KAIKART_MBEDTLS_LIB="$mbedtls_lib" \
+    KAIKART_STB_INCLUDE="$OUT/_deps/imgui-src"
   cp "$stage/launcher/KaiKart.nro" /dist/KaiKart.nro
   ls -la /dist/KaiKart.nro
 }

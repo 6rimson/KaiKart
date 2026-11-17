@@ -52,6 +52,8 @@ DATA		:=	data
 # (the card's small files) next to this Makefile.
 KAIKART_MBEDTLS_INCLUDE	?=
 KAIKART_MBEDTLS_LIB	?=
+# stb_truetype as Dear ImGui carries it (imstb_truetype.h, the games' build fetches it).
+KAIKART_STB_INCLUDE	?=
 INCLUDES	:=	include ../shared ../platform generated
 ROMFS	:=	romfs
 
@@ -63,7 +65,7 @@ ARCH	:=	$(SWITCH2_CPU) -mtp=soft -fPIE
 CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 			$(ARCH) $(DEFINES)
 
-CFLAGS	+=	-I$(KAIKART_MBEDTLS_INCLUDE) $(INCLUDE) -D__SWITCH__ -DKAIKART_VERSION=\"$(APP_VERSION)\" \
+CFLAGS	+=	-I$(KAIKART_MBEDTLS_INCLUDE) -I$(KAIKART_STB_INCLUDE) $(INCLUDE) -D__SWITCH__ -DKAIKART_VERSION=\"$(APP_VERSION)\" \
 			-DMBEDTLS_USER_CONFIG_FILE=\"kaihen_mbedtls_config.h\"
 
 CXXFLAGS	:= $(CFLAGS) -std=gnu++20 -fexceptions
@@ -73,7 +75,7 @@ LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*
 
 # The games' mbed TLS by path: the devkit's portlibs carry an older one (2.28) under the same names.
 LIBS	:= $(KAIKART_MBEDTLS_LIB)/libmbedtls.a $(KAIKART_MBEDTLS_LIB)/libmbedx509.a \
-		$(KAIKART_MBEDTLS_LIB)/libmbedcrypto.a -lz -lnx
+		$(KAIKART_MBEDTLS_LIB)/libmbedcrypto.a -lturbojpeg -lz -lnx
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
