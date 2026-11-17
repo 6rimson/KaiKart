@@ -1,6 +1,6 @@
 // From DriftDroid (github.com/dorPXP/driftdroid, runtime/src/hle/storage/wii_disc_extractor.cpp at
 // 35a7013, GPLv3, by dorPXP), used here for the kaiHEN apps' first-launch disc import
-// (kaihen_setup.cpp). Changes: built for kaiHEN only (its newlib has no pread either), the header
+// (kaikart_install.cpp). Changes: built for kaiHEN only (its newlib has no pread either), the header
 // include path, AES through mbed TLS (the CPU's AES instructions; the runtime's Crypto++ is built
 // without them), and the partition read 64 clusters (2 MB) at a time instead of one.
 //
@@ -460,6 +460,13 @@ void ExtractFst(DecryptedPartitionReader& reader, const fs::path& filesRoot) {
             }
         }
     };
+    // Progress counts the files' own bytes (the partition's size also holds its hash blocks and
+    // unused space, so a bar against it stopped well short of the end).
+    uint64_t fileBytes = 0;
+    for (uint32_t i = 1; i < rootCount; ++i) {
+        if (fst[uint64_t(i) * 12] == 0) fileBytes += ReadBE32(&fst[uint64_t(i) * 12 + 8]);
+    }
+    g_bytesTotal.store(fileBytes, std::memory_order_relaxed);
     walk(1, rootCount, filesRoot);
 }
 

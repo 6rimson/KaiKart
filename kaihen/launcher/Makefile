@@ -45,10 +45,15 @@ APP_AUTHOR	:=	6rimson
 APP_VERSION	:=	0.4.0
 ICON		:=	../icons/WiiCompiled.jpg
 BUILD		:=	build
-SOURCES		:=	source
+SOURCES		:=	source ../shared
 DATA		:=	data
-INCLUDES	:=	include
-#ROMFS	:=	romfs
+# From kaihen/build.sh (launcher): the games' mbed TLS 3.6 (built with kaihen_mbedtls_config.h, the
+# CPU's AES instructions; absolute paths). build.sh stages generated/kaihen_build_info.h and romfs/
+# (the card's small files) next to this Makefile.
+KAIKART_MBEDTLS_INCLUDE	?=
+KAIKART_MBEDTLS_LIB	?=
+INCLUDES	:=	include ../shared ../platform generated
+ROMFS	:=	romfs
 
 #---------------------------------------------------------------------------------
 # options for code generation
@@ -58,20 +63,23 @@ ARCH	:=	$(SWITCH2_CPU) -mtp=soft -fPIE
 CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 			$(ARCH) $(DEFINES)
 
-CFLAGS	+=	$(INCLUDE) -D__SWITCH__ -DKAIKART_VERSION=\"$(APP_VERSION)\"
+CFLAGS	+=	-I$(KAIKART_MBEDTLS_INCLUDE) $(INCLUDE) -D__SWITCH__ -DKAIKART_VERSION=\"$(APP_VERSION)\" \
+			-DMBEDTLS_USER_CONFIG_FILE=\"kaihen_mbedtls_config.h\"
 
-CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
+CXXFLAGS	:= $(CFLAGS) -std=gnu++20 -fexceptions
 
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:= -lnx
+# The games' mbed TLS by path: the devkit's portlibs carry an older one (2.28) under the same names.
+LIBS	:= $(KAIKART_MBEDTLS_LIB)/libmbedtls.a $(KAIKART_MBEDTLS_LIB)/libmbedx509.a \
+		$(KAIKART_MBEDTLS_LIB)/libmbedcrypto.a -lz -lnx
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS	:= $(PORTLIBS) $(LIBNX)
+LIBDIRS	:= $(PORTLIBS) $(DEVKITPRO)/portlibs/switch $(LIBNX)
 
 
 #---------------------------------------------------------------------------------

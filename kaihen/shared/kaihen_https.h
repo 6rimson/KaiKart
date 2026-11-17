@@ -1,13 +1,16 @@
 #pragma once
 
-// A small HTTPS GET for the first-launch setup (kaihen_setup.cpp): one request per object, an
-// optional byte range, redirects followed, the body read in pieces. mbed TLS (the runtime's own
-// copy) checks the server against the card's cacert.pem.
+// A small HTTPS GET for KaiKart's install steps (kaikart_install.cpp): one request per object, an
+// optional byte range, redirects followed, the body read in pieces. mbed TLS checks the server
+// against a certificate bundle (SetCaBundle, before the first request).
 #include <cstdint>
 #include <memory>
 #include <string>
 
 namespace kaihen_https {
+
+// The PEM certificate bundle servers are checked against, e.g. "sdmc:/wiicompiled/cacert.pem".
+void SetCaBundle(const std::string& path);
 
 class Get {
 public:

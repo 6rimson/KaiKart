@@ -110,7 +110,7 @@ sync_tree() {
 # changes): its version, the repository its updates come from (KAIHEN_UPDATE_REPO), and the Retro
 # Rewind release it is built for (version and Code.pul's SHA-256), which it downloads from Retro
 # Rewind's server when the card doesn't have it (kaihen_setup.cpp).
-VERSION="${KAIHEN_VERSION:-0.3.1}"
+VERSION="${KAIHEN_VERSION:-0.4.0}"
 build_info() {
   local info="$SRC/kaihen/platform/kaihen_build_info.h" rr=/host/PulsarPacks/completed/RetroRewind/RetroRewind6 text
   text="#define KAIHEN_APP_VERSION \"$VERSION\"
@@ -197,11 +197,7 @@ build() {
   # copies what a card lacks at its first launch (kaihen_platform.c, card_setup), and in
   # kaihen/dist/card, the card's layout to copy by hand (kaihen/README.md).
   local romfs="$OUT/romfs"
-  rm -rf "$romfs"
-  mkdir -p "$romfs"
-  rsync -a --exclude .DS_Store /host/kaihen/card/wiicompiled "$romfs/"
-  cp "$SRC/runtime/assets/dsp/dsp_coef.bin" "$SRC/runtime/assets/certs/cacert.pem" "$romfs/wiicompiled/"
-  cp -R "$SRC/runtime/assets/wii" "$romfs/wiicompiled/wii_bootstrap"
+  card_files "$romfs"
   elf2nro "$elf" "/dist/$PRODUCT.nro" --nacp="$OUT/$PRODUCT.nacp" --icon="$icon" --romfsdir="$romfs"
   ls -la "/dist/$PRODUCT.nro"
   local card=/dist/card
@@ -211,13 +207,49 @@ build() {
   ln -f "/dist/$PRODUCT.nro" "$card/switch/$PRODUCT.nro" 2>/dev/null || cp "/dist/$PRODUCT.nro" "$card/switch/"
 }
 
-action="${1:?usage: build.sh sources|translate|configure|build|shell}"
+# The wiicompiled folder's own small files (no game files) in $1/wiicompiled: the games and the
+# launcher carry them and copy what a card lacks.
+card_files() {
+  rm -rf "$1"
+  mkdir -p "$1"
+  rsync -a --exclude .DS_Store /host/kaihen/card/wiicompiled "$1/"
+  cp "$SRC/runtime/assets/dsp/dsp_coef.bin" "$SRC/runtime/assets/certs/cacert.pem" "$1/wiicompiled/"
+  cp -R "$SRC/runtime/assets/wii" "$1/wiicompiled/wii_bootstrap"
+}
+
+# The KaiKart launcher (kaihen/launcher), /dist/KaiKart.nro: built with the devkit's GCC against
+# the games' mbed TLS 3.6 (so a game is built first), with the same build info (version, the Retro
+# Rewind pin) and the card's small files in its romfs.
+launcher() {
+  source "$DEVKITPRO/switch2vars.sh" >/dev/null
+  sync_tree
+  local mbedtls_include="$OUT/_deps/mkw_mbedtls_upstream-src/include"
+  local mbedtls_lib="$OUT/_deps/mkw_mbedtls_upstream-build/library"
+  [[ -f "$mbedtls_lib/libmbedtls.a" ]] || {
+    echo "No mbed TLS build in $OUT: run kaihen/run.sh build first" >&2
+    exit 1
+  }
+  local stage="$OUT/launcher-src"
+  rm -rf "$stage"
+  mkdir -p "$stage"
+  cp -R "$SRC/kaihen/launcher" "$SRC/kaihen/shared" "$SRC/kaihen/platform" "$SRC/kaihen/icons" "$stage/"
+  mkdir -p "$stage/launcher/generated"
+  cp "$SRC/kaihen/platform/kaihen_build_info.h" "$stage/launcher/generated/"
+  card_files "$stage/launcher/romfs"
+  make -C "$stage/launcher" -j"$JOBS" APP_VERSION="$VERSION" \
+    KAIKART_MBEDTLS_INCLUDE="$mbedtls_include" KAIKART_MBEDTLS_LIB="$mbedtls_lib"
+  cp "$stage/launcher/KaiKart.nro" /dist/KaiKart.nro
+  ls -la /dist/KaiKart.nro
+}
+
+action="${1:?usage: build.sh sources|translate|configure|build|launcher|shell}"
 shift
 case "$action" in
   sources) sources ;;
   translate) translate ;;
   configure) configure "$@" ;;
   build) build "$@" ;;
+  launcher) launcher ;;
   shell) sync_tree; bash ;;
   *) echo "unknown action $action" >&2; exit 2 ;;
 esac

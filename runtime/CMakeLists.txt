@@ -427,11 +427,8 @@ if(MKW_KAIHEN)
     set_source_files_properties("${MKW_KAIHEN_PLATFORM_SOURCE}" PROPERTIES
         INCLUDE_DIRECTORIES "${MKW_KAIHEN_SQLITE_DIR}"
         SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
-    # First-launch setup: the disc imported from an image on the card, and Retro Rewind's pack.
-    set(MKW_KAIHEN_SETUP_SOURCES
-        "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/kaihen_setup.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/kaihen_https.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/wii_disc_extractor.cpp")
+    # The start check: the disc and Retro Rewind are on the card (the KaiKart launcher sets them up).
+    set(MKW_KAIHEN_SETUP_SOURCES "${CMAKE_CURRENT_LIST_DIR}/../kaihen/platform/kaihen_setup.cpp")
     list(APPEND SOURCES ${MKW_KAIHEN_SETUP_SOURCES})
     set_source_files_properties(${MKW_KAIHEN_SETUP_SOURCES} PROPERTIES
         SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)

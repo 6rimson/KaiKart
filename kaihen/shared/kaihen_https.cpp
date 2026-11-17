@@ -1,7 +1,6 @@
 // A small HTTPS GET (kaihen_https.h).
 #include "kaihen_https.h"
 
-#include "runtime_config.h"
 
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
@@ -24,6 +23,8 @@ namespace kaihen_https {
 namespace {
 
 // The certificates and the random generator, set up once.
+std::string g_ca_bundle;
+
 struct Globals {
     mbedtls_x509_crt ca;
     mbedtls_entropy_context entropy;
@@ -48,9 +49,8 @@ Globals& Shared() {
             globals.error = "the random number generator didn't start";
             return;
         }
-        const std::string bundle = std::string(RuntimeConfigFile::kaihen_root_directory()) + "/cacert.pem";
-        if (mbedtls_x509_crt_parse_file(&globals.ca, bundle.c_str()) < 0) {
-            globals.error = "couldn't read " + bundle;
+        if (g_ca_bundle.empty() || mbedtls_x509_crt_parse_file(&globals.ca, g_ca_bundle.c_str()) < 0) {
+            globals.error = "couldn't read the certificates (" + g_ca_bundle + ")";
             return;
         }
         globals.ready = true;
@@ -91,6 +91,8 @@ std::string HeaderValue(const std::string& headers, const char* name) {
 }
 
 }  // namespace
+
+void SetCaBundle(const std::string& path) { g_ca_bundle = path; }
 
 struct Get::Impl {
     mbedtls_net_context net;

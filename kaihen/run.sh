@@ -5,6 +5,7 @@
 #   kaihen/run.sh translate    translate your game (and Retro Rewind, with Retro WFC)
 #   kaihen/run.sh configure    configure the CMake build
 #   kaihen/run.sh build        build and make the .nro (kaihen/dist/)
+#   kaihen/run.sh launcher     build the KaiKart launcher (kaihen/dist/KaiKart.nro), after a build
 #   kaihen/run.sh sd /Volumes/CARD [--nand DIR] [--rr-save FILE]
 #                              put the .nro and the game's files on a microSD card (kaihen/sd.py)
 #   kaihen/run.sh release      build both apps for a release: kaihen/dist/release/ with SHA256SUMS
@@ -27,7 +28,7 @@ case "$KAIHEN_PRODUCT" in
   WiiCompiled) WORK="${KAIHEN_WORK:-wiicompiled-kaihen-work-mkw}" ;;
   *) echo "KAIHEN_PRODUCT is RetroRewind or WiiCompiled" >&2; exit 2 ;;
 esac
-action="${1:?usage: kaihen/run.sh setup|sources|translate|configure|build|sd|release|shell}"
+action="${1:?usage: kaihen/run.sh setup|sources|translate|configure|build|launcher|sd|release|shell}"
 
 if [[ "$action" == sd ]]; then
   shift
