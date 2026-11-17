@@ -1,7 +1,8 @@
 // From DriftDroid (github.com/dorPXP/driftdroid, runtime/src/hle/storage/wii_disc_extractor.cpp at
 // 35a7013, GPLv3, by dorPXP), used here for the kaiHEN apps' first-launch disc import
-// (kaihen_setup.cpp). Changes: built for kaiHEN only (its newlib has no pread either), and the
-// header include path.
+// (kaihen_setup.cpp). Changes: built for kaiHEN only (its newlib has no pread either), the header
+// include path, AES through mbed TLS (the CPU's AES instructions; the runtime's Crypto++ is built
+// without them), and the partition read 64 clusters (2 MB) at a time instead of one.
 //
 // Extracts a Wii disc image into the DATA folder layout hle/storage/dvd.cpp mounts as its DVD
 // root. Format details below (partition table, ticket/title-key crypto, per-cluster data
@@ -12,8 +13,7 @@
 // in 2008) and is embedded the same way Dolphin's own public source does.
 #include "wii_disc_extractor.h"
 
-#include <cryptopp/aes.h>
-#include <cryptopp/modes.h>
+#include <mbedtls/aes.h>
 
 #include <algorithm>
 #include <array>
@@ -63,9 +63,13 @@ public:
 
 void AesCbcDecrypt(const uint8_t key[16], const uint8_t iv[16], const uint8_t* in, uint8_t* out,
                     size_t size) {
-    CryptoPP::CBC_Mode<CryptoPP::AES>::Decryption dec;
-    dec.SetKeyWithIV(key, 16, iv);
-    dec.ProcessData(out, in, size);
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    mbedtls_aes_setkey_dec(&aes, key, 128);
+    uint8_t chain[16];
+    std::memcpy(chain, iv, 16);
+    mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT, size, chain, in, out);
+    mbedtls_aes_free(&aes);
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -299,7 +303,13 @@ PartitionInfo OpenDataPartition(ByteSource& src) {
 // through each file but does jump between the FST and file bodies.
 class DecryptedPartitionReader {
 public:
-    DecryptedPartitionReader(ByteSource& src, const PartitionInfo& info) : src_(src), info_(info) {}
+    DecryptedPartitionReader(ByteSource& src, const PartitionInfo& info) : src_(src), info_(info) {
+        mbedtls_aes_init(&aes_);
+        mbedtls_aes_setkey_dec(&aes_, info_.titleKey, 128);
+        raw_.resize(kWindowClusters * kClusterSize);
+        plain_.resize(kWindowClusters * kClusterDataSize);
+    }
+    ~DecryptedPartitionReader() { mbedtls_aes_free(&aes_); }
 
     void ReadAt(uint64_t offset, void* buffer, size_t size) {
         auto* out = static_cast<uint8_t*>(buffer);
@@ -307,35 +317,49 @@ public:
         while (done < size) {
             const uint64_t logical = offset + done;
             const uint64_t clusterIndex = logical / kClusterDataSize;
-            const uint64_t withinCluster = logical % kClusterDataSize;
-            const size_t chunk =
-                static_cast<size_t>(std::min<uint64_t>(size - done, kClusterDataSize - withinCluster));
             EnsureClusterLoaded(clusterIndex);
-            std::memcpy(out + done, &clusterPlain_[withinCluster], chunk);
+            const uint64_t withinWindow = logical - windowFirst_ * kClusterDataSize;
+            const size_t chunk = static_cast<size_t>(
+                std::min<uint64_t>(size - done, uint64_t(windowCount_) * kClusterDataSize - withinWindow));
+            std::memcpy(out + done, &plain_[withinWindow], chunk);
             done += chunk;
         }
     }
 
 private:
+    // Clusters are read and decrypted a window at a time: one large read from the card instead of
+    // one per 32 KiB cluster. Extraction reads forward through each file, so the next file's data
+    // is usually already in the window.
+    static constexpr uint64_t kWindowClusters = 64;
+
     void EnsureClusterLoaded(uint64_t clusterIndex) {
-        if (loadedCluster_.has_value() && *loadedCluster_ == clusterIndex) {
+        if (windowCount_ != 0 && clusterIndex >= windowFirst_ && clusterIndex < windowFirst_ + windowCount_) {
             return;
         }
-        uint8_t raw[kClusterSize];
-        src_.ReadAt(info_.dataOffset + clusterIndex * kClusterSize, raw, kClusterSize);
-        // The IV for the 0x7C00-byte data part is the cluster's own hash block bytes at 0x3D0,
-        // taken directly from the still-encrypted cluster - this extractor never decrypts the
-        // hash block itself since it only pulls file data out, it doesn't verify hash trees.
-        uint8_t iv[16];
-        std::memcpy(iv, raw + 0x3d0, 16);
-        AesCbcDecrypt(info_.titleKey, iv, raw + kClusterHashSize, clusterPlain_.data(), kClusterDataSize);
-        loadedCluster_ = clusterIndex;
+        const uint64_t clusters = (info_.dataSize + kClusterSize - 1) / kClusterSize;
+        const uint64_t count = std::max<uint64_t>(1, std::min<uint64_t>(kWindowClusters,
+                                                                         clusters > clusterIndex ? clusters - clusterIndex : 1));
+        src_.ReadAt(info_.dataOffset + clusterIndex * kClusterSize, raw_.data(), size_t(count * kClusterSize));
+        for (uint64_t i = 0; i < count; ++i) {
+            const uint8_t* raw = &raw_[i * kClusterSize];
+            // The IV for the 0x7C00-byte data part is the cluster's own hash block bytes at 0x3D0,
+            // taken directly from the still-encrypted cluster - this extractor never decrypts the
+            // hash block itself since it only pulls file data out, it doesn't verify hash trees.
+            uint8_t iv[16];
+            std::memcpy(iv, raw + 0x3d0, 16);
+            mbedtls_aes_crypt_cbc(&aes_, MBEDTLS_AES_DECRYPT, kClusterDataSize, iv, raw + kClusterHashSize,
+                                  &plain_[i * kClusterDataSize]);
+        }
+        windowFirst_ = clusterIndex;
+        windowCount_ = count;
     }
 
     ByteSource& src_;
     const PartitionInfo& info_;
-    std::optional<uint64_t> loadedCluster_;
-    std::array<uint8_t, kClusterDataSize> clusterPlain_{};
+    mbedtls_aes_context aes_;
+    std::vector<uint8_t> raw_, plain_;
+    uint64_t windowFirst_ = 0;
+    uint64_t windowCount_ = 0;
 };
 
 // ----------------------------------------------------------------------------------------------

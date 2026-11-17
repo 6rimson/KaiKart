@@ -102,6 +102,9 @@ std::string Lower(std::string text) {
     return text;
 }
 
+using Clock = std::chrono::steady_clock;
+double Seconds(Clock::time_point since) { return std::chrono::duration<double>(Clock::now() - since).count(); }
+
 uint64_t FreeBytes(const fs::path& path) {
     struct statvfs info {};
     if (statvfs(path.c_str(), &info) != 0) {
@@ -163,6 +166,7 @@ bool ImportDisc(const fs::path& root, const fs::path& data) {
         return false;
     }
     SetStep("Importing your disc", image[0].filename().string());
+    const auto started = Clock::now();
 
     const fs::path partial = data.parent_path() / (data.filename().string() + ".partial");
     std::error_code error;
@@ -196,6 +200,12 @@ bool ImportDisc(const fs::path& root, const fs::path& data) {
     extracting = false;
     progress.join();
     for (const int fd : fds) close(fd);
+    {
+        const double seconds = Seconds(started);
+        const double megabytes = double(WiiDiscExtractor_BytesDone()) / 1e6;
+        RT_LOGF("setup", "disc extracted: %.0f MB in %.0f s (%.1f MB/s)\n", megabytes, seconds,
+                megabytes / std::max(seconds, 0.001));
+    }
     if (result != 0) {
         fs::remove_all(partial, error);
         Fail(message, "Use your own clean, unmodified PAL Mario Kart Wii disc (RMCP01).");
@@ -311,6 +321,9 @@ bool ReadZipDirectory(const std::string& url, std::vector<ZipEntry>& entries, ui
 }
 
 // Reads the streamed run exactly.
+// Where the download's time goes (logged when it ends).
+double g_network_seconds = 0, g_write_seconds = 0;
+
 class RunReader {
 public:
     kaihen_https::Get get;
@@ -318,7 +331,9 @@ public:
     bool Exact(void* out, size_t size, std::string& error) {
         auto* bytes = static_cast<uint8_t*>(out);
         while (size > 0) {
+            const auto started = Clock::now();
             const int64_t n = get.Read(bytes, size, error);
+            g_network_seconds += Seconds(started);
             if (n <= 0) {
                 if (n == 0) error = "the download ended early";
                 return false;
@@ -349,12 +364,15 @@ bool UnpackEntry(RunReader& reader, const ZipEntry& entry, const fs::path& folde
         return true;
     }
     fs::create_directories(target.parent_path(), fs_error);
-    const fs::path partial = target.string() + ".part";
-    FILE* out = std::fopen(partial.c_str(), "wb");
+    // Written under its own name: a file cut short by an interruption has the wrong size, which
+    // the resume check catches, and the card is spared a rename and a delete per file.
+    FILE* out = std::fopen(target.c_str(), "wb");
     if (!out) {
         error = "couldn't write " + target.filename().string() + " to the card";
         return false;
     }
+    static std::vector<char> file_buffer(1 << 18);
+    std::setvbuf(out, file_buffer.data(), _IOFBF, file_buffer.size());
     std::vector<uint8_t> in(1 << 16), unpacked(1 << 18);
     z_stream zip{};
     bool ok = entry.method == 0 || (entry.method == 8 && inflateInit2(&zip, -MAX_WBITS) == Z_OK);
@@ -367,7 +385,9 @@ bool UnpackEntry(RunReader& reader, const ZipEntry& entry, const fs::path& folde
         left -= chunk;
         if (entry.method == 0) {
             crc = crc32(crc, in.data(), uInt(chunk));
+            const auto started = Clock::now();
             ok = std::fwrite(in.data(), 1, chunk, out) == chunk;
+            g_write_seconds += Seconds(started);
             written += chunk;
             continue;
         }
@@ -384,12 +404,17 @@ bool UnpackEntry(RunReader& reader, const ZipEntry& entry, const fs::path& folde
             }
             const size_t produced = unpacked.size() - zip.avail_out;
             crc = crc32(crc, unpacked.data(), uInt(produced));
+            const auto started = Clock::now();
             ok = std::fwrite(unpacked.data(), 1, produced, out) == produced;
+            g_write_seconds += Seconds(started);
             written += produced;
         } while (ok && zip.avail_out == 0);
     }
     if (entry.method == 8) inflateEnd(&zip);
-    if (std::fclose(out) != 0 && ok) {
+    const auto closing = Clock::now();
+    const int closed = std::fclose(out);
+    g_write_seconds += Seconds(closing);
+    if (closed != 0 && ok) {
         ok = false;
         error = "writing to the card failed (is it full?)";
     }
@@ -398,12 +423,10 @@ bool UnpackEntry(RunReader& reader, const ZipEntry& entry, const fs::path& folde
         error = "a file arrived damaged";
     }
     if (!ok) {
-        fs::remove(partial, fs_error);
+        fs::remove(target, fs_error);
         return false;
     }
-    fs::remove(target, fs_error);
-    fs::rename(partial, target, fs_error);
-    return !fs_error;
+    return true;
 }
 
 bool DownloadRetroRewind(const fs::path& folder) {
@@ -445,6 +468,9 @@ bool DownloadRetroRewind(const fs::path& folder) {
     }
     const uint64_t run_start = entries.front().offset;
     SetStep("Getting Retro Rewind " KAIHEN_RR_VERSION, "Downloading and unpacking (about 1.9 GB)");
+    const auto started = Clock::now();
+    const size_t first = next;
+    int reported = 0;
     int failures = 0;
     while (next < entries.size()) {
         RunReader reader;
@@ -457,9 +483,15 @@ bool DownloadRetroRewind(const fs::path& folder) {
             if (!UnpackEntry(reader, entries[next], partial, error)) break;
             ++next;
             failures = 0;
+            const float progress = float(double(entries[next - 1].offset + entries[next - 1].packed - run_start) /
+                                         double(run_end - run_start));
+            if (int(progress * 10) > reported) {
+                reported = int(progress * 10);
+                RT_LOGF("setup", "Retro Rewind %d%% after %.0f s (network %.0f s, card %.0f s)\n", reported * 10,
+                        Seconds(started), g_network_seconds, g_write_seconds);
+            }
             std::lock_guard<std::mutex> lock(g_status.mutex);
-            g_status.progress = float(double(entries[next - 1].offset + entries[next - 1].packed - run_start) /
-                                      double(run_end - run_start));
+            g_status.progress = progress;
         }
         if (next < entries.size()) {
             RT_LOGF("setup", "download interrupted at %s: %s\n", entries[next].name.c_str(), error.c_str());
@@ -473,6 +505,13 @@ bool DownloadRetroRewind(const fs::path& folder) {
         return false;
     }
 
+    {
+        const double seconds = Seconds(started);
+        const double megabytes = double(entries.back().offset + entries.back().packed - entries[first].offset) / 1e6;
+        RT_LOGF("setup", "Retro Rewind downloaded: %.0f MB in %.0f s (%.1f MB/s): network %.0f s, card %.0f s, "
+                "%zu files\n", megabytes, seconds, megabytes / std::max(seconds, 0.001), g_network_seconds,
+                g_write_seconds, entries.size() - first);
+    }
     SetStep("Checking Retro Rewind");
     if (!RetroRewindReady(partial)) {
         Fail("The downloaded Retro Rewind doesn't match this app.", "Open the app again to retry the download.");

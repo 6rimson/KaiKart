@@ -591,7 +591,11 @@ void userAppInit(void) {
     copy_thread_pointer();
     cores_start();
     card_setup();
-    socketInitializeDefault();
+    /* libnx's defaults, with TCP receive buffers that may grow to 1 MiB (from 256 KiB): the
+     * first-launch Retro Rewind download (about 1.9 GB) was limited by it on Wi-Fi. */
+    SocketInitConfig sockets = *socketGetDefaultInitConfig();
+    sockets.tcp_rx_buf_max_size = 0x100000;
+    socketInitialize(&sockets);
     /* With nxlink -s, stdout and stderr go to the PC; otherwise to the card. */
     g_nxlink = nxlinkStdio();
     mkdir(KAIHEN_ROOT "/UserData", 0777);
