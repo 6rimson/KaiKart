@@ -531,6 +531,18 @@ void DrawRebindPrompt() {
         return;
     }
     if (g_rebind.active) {
+#if defined(MKW_KAIHEN)
+        // The console has no keyboard or mouse, and ImGui's buttons can't be reached from a pad:
+        // waiting out the time keeps the button as it was.
+        ImGui::Text("%s: press the new button on Player %d's controller.", g_rebind.label.c_str(),
+                    static_cast<int>(g_rebind.port) + 1);
+        const float left = std::chrono::duration<float>(g_rebind.deadline - Clock::now()).count();
+        ImGui::TextDisabled("Nothing pressed in %d seconds keeps the current button.",
+                            std::max(0, static_cast<int>(std::ceil(left))));
+        if (left <= 0.0f) g_rebind.active = false;
+        const bool clear = false, overControl = false;
+        const float remaining = 1.0f;
+#else
         ImGui::Text("Rebind: %s", g_rebind.label.c_str());
         ImGui::TextUnformatted(g_rebind.kind == RebindKind::Controller
             ? "Press a controller button, pull a trigger, or move a stick."
@@ -546,6 +558,7 @@ void DrawRebindPrompt() {
         if (ImGui::Button("Cancel")) g_rebind.active = false;
         // UI clicks must not become mouse bindings (buttons activate on release).
         const bool overControl = ImGui::IsAnyItemHovered();
+#endif
         if (g_rebind.active && (clear || remaining <= 0.0f)) {
             CompleteRebind(g_rebind.kind == RebindKind::Controller ? PAD_NATIVE_BUTTON_DISABLED
                                                                   : static_cast<uint32_t>(PAD_KEY_INVALID));
@@ -1831,6 +1844,7 @@ void ConsoleSetCpuBoost(int mode, bool readConfiguration) {
 }
 
 int g_consoleMenuRow = 0;
+int g_consoleMenuPlayer = 0;  // whose controls the button rows show and change
 bool g_consoleExitArmed = false;
 // Plus reaches SmileBASIC too, which stops its program, and with it the launcher's link to the PC.
 bool g_consoleLinkLost = false;
@@ -1953,6 +1967,19 @@ void ConsoleMenuInput(int rows) {
         now[i] = SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(i));
     }
     const auto pressed = [&](SDL_GamepadButton button) { return now[button] && !g_consoleButtons[button]; };
+    // The left stick moves through the menu too (a single sideways Joy-Con has no D-pad): a push past
+    // half way counts once, until the stick comes back.
+    static int s_stickDirection = 0;  // 0 none, 1 up, 2 down, 3 left, 4 right
+    int stickPushed = 0;
+    {
+        const int x = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX), y = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
+        int direction = 0;
+        if (std::abs(x) > 16000 || std::abs(y) > 16000) {
+            direction = std::abs(y) >= std::abs(x) ? (y < 0 ? 1 : 2) : (x < 0 ? 3 : 4);
+        }
+        if (direction != s_stickDirection) stickPushed = direction;
+        s_stickDirection = direction;
+    }
 #if !defined(MKW_KAIHEN)  // kaiHEN: no SmileBASIC behind the game, so Plus is the game's pause
     if (pressed(SDL_GAMEPAD_BUTTON_START) && !g_consoleLinkLost) {
         g_consoleLinkLost = true;
@@ -1960,20 +1987,25 @@ void ConsoleMenuInput(int rows) {
     }
 #endif
     if (!g_rebind.active) {
-        // L + R + right stick click: Minus is the game's pause, and Plus must stay unused.
-        if (now[SDL_GAMEPAD_BUTTON_LEFT_SHOULDER] && now[SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER] &&
-            pressed(SDL_GAMEPAD_BUTTON_RIGHT_STICK)) {
+        // L + R + right stick click: Minus is the game's pause, and Plus must stay unused. On a single
+        // sideways Joy-Con, SL + SR + stick click (its SL and SR are the ZL and ZR triggers, its stick
+        // the left one: kaihen/patches/sdl3-kaihen.diff).
+        const bool triggers = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000 &&
+                              SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000;
+        if ((now[SDL_GAMEPAD_BUTTON_LEFT_SHOULDER] && now[SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER] &&
+             pressed(SDL_GAMEPAD_BUTTON_RIGHT_STICK)) ||
+            (triggers && pressed(SDL_GAMEPAD_BUTTON_LEFT_STICK))) {
             g_consoleMenuOpen = !g_consoleMenuOpen;
         } else if (g_consoleMenuOpen) {
             int change = 0;
             if (pressed(SDL_GAMEPAD_BUTTON_SOUTH)) g_consoleMenuOpen = false;
-            if (pressed(SDL_GAMEPAD_BUTTON_DPAD_UP)) g_consoleMenuRow = (g_consoleMenuRow + rows - 1) % rows;
-            if (pressed(SDL_GAMEPAD_BUTTON_DPAD_DOWN)) g_consoleMenuRow = (g_consoleMenuRow + 1) % rows;
+            if (pressed(SDL_GAMEPAD_BUTTON_DPAD_UP) || stickPushed == 1) g_consoleMenuRow = (g_consoleMenuRow + rows - 1) % rows;
+            if (pressed(SDL_GAMEPAD_BUTTON_DPAD_DOWN) || stickPushed == 2) g_consoleMenuRow = (g_consoleMenuRow + 1) % rows;
             if (g_consoleMenuRow != rows - 1) g_consoleExitArmed = false;
-            if (pressed(SDL_GAMEPAD_BUTTON_DPAD_LEFT)) change = -1;
-            if (pressed(SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) change = 1;
+            if (pressed(SDL_GAMEPAD_BUTTON_DPAD_LEFT) || stickPushed == 3) change = -1;
+            if (pressed(SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || stickPushed == 4) change = 1;
             const bool confirm = pressed(SDL_GAMEPAD_BUTTON_EAST);
-            const int firstButton = kConsoleOptionRows;
+            const int playerRow = kConsoleOptionRows, firstButton = kConsoleOptionRows + 1;
             if (g_consoleMenuRow == 0 && change != 0) {
                 const int count = static_cast<int>(kConsoleScales.size());
                 SetResolutionScale(kConsoleScales[(ConsoleScaleIndex() + count + change) % count]);
@@ -2006,12 +2038,17 @@ void ConsoleMenuInput(int rows) {
                 SetRetroRewindFrameSkip(!RetroRewindFrameSkip());
                 RT_LOGF("perf", "frame skip %s\n", RetroRewindFrameSkip() ? "on" : "off");
 #endif
-            } else if (g_consoleMenuRow >= firstButton && g_consoleMenuRow < rows - 2 && confirm) {
+            } else if (g_consoleMenuRow == playerRow && (change != 0 || confirm)) {
+                g_consoleMenuPlayer = (g_consoleMenuPlayer + (change != 0 ? change : 1) + PAD_MAX_CONTROLLERS) %
+                                      PAD_MAX_CONTROLLERS;
+            } else if (g_consoleMenuRow >= firstButton && g_consoleMenuRow < rows - 2 && confirm &&
+                       PADGetIndexForPort(static_cast<u32>(g_consoleMenuPlayer)) >= 0) {
+                // The new button is read from that player's own controller.
                 const auto& button = kControllerButtons[static_cast<size_t>(g_consoleMenuRow - firstButton)];
-                g_controllerPort = 0;
+                g_controllerPort = g_consoleMenuPlayer;
                 BeginRebind(RebindKind::Controller, button.padButton, button.label);
             } else if (g_consoleMenuRow == rows - 2 && confirm) {
-                PADRestoreDefaultMapping(0);
+                PADRestoreDefaultMapping(static_cast<u32>(g_consoleMenuPlayer));
                 PADSerializeMappings();
             } else if (g_consoleMenuRow == rows - 1 && confirm) {
                 if (g_consoleExitArmed && !g_consoleLinkLost) {
@@ -2024,28 +2061,96 @@ void ConsoleMenuInput(int rows) {
     g_consoleButtons = now;
 }
 
-const char* ConsoleNativeButtonName(uint32_t native) {
+// The controller a player holds (kaihen_player_controller), so the button rows name its own buttons
+// (a single Joy-Con is turned sideways by the SDL driver: kaihen/patches/sdl3-kaihen.diff).
+enum class ConsoleController { None, Handheld, Pro, JoyConPair, JoyConLeft, JoyConRight };
+#if defined(MKW_KAIHEN)
+extern "C" int kaihen_player_controller(int player);
+ConsoleController ConsolePlayerController(int player) {
+    return static_cast<ConsoleController>(std::clamp(kaihen_player_controller(player), 0, 5));
+}
+#else
+ConsoleController ConsolePlayerController(int player) {
+    return PADGetIndexForPort(static_cast<u32>(player)) >= 0 ? ConsoleController::Pro : ConsoleController::None;
+}
+#endif
+
+bool ConsoleSingleJoyCon(ConsoleController controller) {
+    return controller == ConsoleController::JoyConLeft || controller == ConsoleController::JoyConRight;
+}
+
+const char* ConsoleControllerName(ConsoleController controller) {
+    switch (controller) {
+    case ConsoleController::Handheld: return "Handheld";
+    case ConsoleController::Pro: return "Pro Controller";
+    case ConsoleController::JoyConPair: return "Joy-Con pair";
+    case ConsoleController::JoyConLeft: return "Left Joy-Con, sideways";
+    case ConsoleController::JoyConRight: return "Right Joy-Con, sideways";
+    default: return "not connected";
+    }
+}
+
+// The button on the player's controller that a mapping reads. L and R left at their default read
+// the ZL and ZR triggers (a single Joy-Con's SL and SR).
+std::string ConsoleNativeButtonName(uint32_t native, PADButton padButton, ConsoleController controller) {
+    const bool single = ConsoleSingleJoyCon(controller);
+    if (native == PAD_NATIVE_BUTTON_INVALID && padButton == PAD_TRIGGER_L) return single ? "SL" : "ZL";
+    if (native == PAD_NATIVE_BUTTON_INVALID && padButton == PAD_TRIGGER_R) return single ? "SR" : "ZR";
+    if (native == PAD_NATIVE_BUTTON_INVALID || native == PAD_NATIVE_BUTTON_DISABLED) return "None";
+    if (PADIsAxisButton(native)) {
+        const bool negative = PADAxisButtonNegative(native);
+        switch (PADAxisButtonAxis(native)) {
+        case SDL_GAMEPAD_AXIS_LEFT_TRIGGER: return single ? "SL" : "ZL";
+        case SDL_GAMEPAD_AXIS_RIGHT_TRIGGER: return single ? "SR" : "ZR";
+        case SDL_GAMEPAD_AXIS_LEFTX: return single ? (negative ? "Stick left" : "Stick right")
+                                                   : (negative ? "Left stick left" : "Left stick right");
+        case SDL_GAMEPAD_AXIS_LEFTY: return single ? (negative ? "Stick up" : "Stick down")
+                                                   : (negative ? "Left stick up" : "Left stick down");
+        case SDL_GAMEPAD_AXIS_RIGHTX: return negative ? "Right stick left" : "Right stick right";
+        case SDL_GAMEPAD_AXIS_RIGHTY: return negative ? "Right stick up" : "Right stick down";
+        default: return "Stick";
+        }
+    }
+    if (single) {
+        // Named as printed. Turned sideways, the right Joy-Con's X, A, B and Y sit right, bottom, left
+        // and top; the left one's arrows point the way they sit. The top one does tricks, in the
+        // direction the stick points.
+        const bool left = controller == ConsoleController::JoyConLeft;
+        switch (native) {
+        case SDL_GAMEPAD_BUTTON_EAST: return left ? "Right arrow" : "X";
+        case SDL_GAMEPAD_BUTTON_SOUTH: return left ? "Down arrow" : "A";
+        case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return left ? "Left arrow" : "B";
+        case SDL_GAMEPAD_BUTTON_DPAD_UP: return left ? "Up arrow" : "Y";
+        case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return left ? "Up arrow + stick down" : "Y + stick down";
+        case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return left ? "Up arrow + stick left" : "Y + stick left";
+        case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return left ? "Up arrow + stick right" : "Y + stick right";
+        case SDL_GAMEPAD_BUTTON_START: return left ? "Minus" : "Plus";
+        case SDL_GAMEPAD_BUTTON_LEFT_STICK: return "Stick press";
+        default: return "Not on this Joy-Con";
+        }
+    }
     switch (native) {
     case SDL_GAMEPAD_BUTTON_EAST: return "A";
     case SDL_GAMEPAD_BUTTON_SOUTH: return "B";
     case SDL_GAMEPAD_BUTTON_NORTH: return "X";
     case SDL_GAMEPAD_BUTTON_WEST: return "Y";
     case SDL_GAMEPAD_BUTTON_START: return "Plus";
+    case SDL_GAMEPAD_BUTTON_BACK: return "Minus";
     case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return "L";
     case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return "R";
-    case SDL_GAMEPAD_BUTTON_LEFT_STICK: return "L stick";
-    case SDL_GAMEPAD_BUTTON_RIGHT_STICK: return "R stick";
+    case SDL_GAMEPAD_BUTTON_LEFT_STICK: return "Left stick press";
+    case SDL_GAMEPAD_BUTTON_RIGHT_STICK: return "Right stick press";
     case SDL_GAMEPAD_BUTTON_DPAD_UP: return "D-pad up";
     case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return "D-pad down";
     case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return "D-pad left";
     case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return "D-pad right";
-    default: return "Trigger or unset";
+    default: return "Other";
     }
 }
 
 void DrawConsoleMenu() {
     const int buttons = static_cast<int>(kControllerButtons.size());
-    const int rows = kConsoleOptionRows + buttons + 2;
+    const int rows = kConsoleOptionRows + 1 + buttons + 2;  // options, player, buttons, reset, quit
     const bool wasOpen = g_consoleMenuOpen;
     // CPU boost on at launch (see ConsoleSetCpuBoost). MKW_CPU_BOOST=0 in hbxl-env leaves it off; another
     // number picks the nn::oe boost mode when the launcher has no clock access.
@@ -2108,18 +2213,26 @@ void DrawConsoleMenu() {
         ImGui::TextDisabled("  CPU speed: about %.0f MHz", static_cast<double>(g_consoleCpuMhz));
 #endif
         ImGui::Separator();
+        const auto player = static_cast<u32>(g_consoleMenuPlayer);
+        const bool connected = PADGetIndexForPort(player) >= 0;
+        const ConsoleController controller =
+            connected ? ConsolePlayerController(g_consoleMenuPlayer) : ConsoleController::None;
+        row(kConsoleOptionRows, "Controls for: Player " + std::to_string(g_consoleMenuPlayer + 1) + " (" +
+                                    ConsoleControllerName(controller) + ")");
         uint32_t count = 0;
-        auto* mappings = PADGetButtonMappings(0, &count);
+        auto* mappings = connected ? PADGetButtonMappings(player, &count) : nullptr;
         for (int i = 0; i < buttons; ++i) {
             const auto& button = kControllerButtons[static_cast<size_t>(i)];
             uint32_t native = PAD_NATIVE_BUTTON_INVALID;
             for (uint32_t m = 0; mappings != nullptr && m < count; ++m) {
                 if (mappings[m].padButton == button.padButton) native = mappings[m].nativeButton;
             }
-            row(kConsoleOptionRows + i, std::string(button.label) + ": " + ConsoleNativeButtonName(native));
+            row(kConsoleOptionRows + 1 + i,
+                std::string(button.label) + ": " +
+                    (connected ? ConsoleNativeButtonName(native, button.padButton, controller) : "-"));
         }
         ImGui::Separator();
-        row(rows - 2, "Reset buttons to default");
+        row(rows - 2, "Reset Player " + std::to_string(g_consoleMenuPlayer + 1) + "'s buttons to default");
         row(rows - 1, g_consoleLinkLost   ? "Launcher link lost: quit with HOME"
                       : g_consoleExitArmed ? "Press A again to quit"
 #if defined(MKW_KAIHEN)
@@ -2128,7 +2241,13 @@ void DrawConsoleMenu() {
                                            : "Return to launcher");
 #endif
         ImGui::Separator();
-        ImGui::TextDisabled("D-pad: move, change. A: rebind. B: close.");
+        if (ConsoleSingleJoyCon(ConsolePlayerController(0))) {
+            ImGui::TextDisabled(ConsolePlayerController(0) == ConsoleController::JoyConLeft
+                                    ? "Stick: move, change. Right arrow: change button. Down arrow: close."
+                                    : "Stick: move, change. X: change button. A: close.");
+        } else {
+            ImGui::TextDisabled("D-pad: move, change. A: change button. B: close.");
+        }
         DrawRebindPrompt();
     }
     ImGui::End();

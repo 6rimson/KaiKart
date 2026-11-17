@@ -622,7 +622,11 @@ void userAppInit(void) {
     setenv("MESA_SHADER_CACHE_DISABLE", "true", 0);
     if (chdir(KAIHEN_ROOT) != 0)
         fprintf(stderr, "[kaihen] no %s on the card (%d)\n", KAIHEN_ROOT, errno);
-    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    /* Up to four players (local multiplayer): the SDL driver gives each console player slot its
+     * own controller (kaihen/patches/sdl3-kaihen.diff); a pair of Joy-Cons is one player. */
+    padConfigureInput(4, HidNpadStyleSet_NpadStandard);
+    /* A single Joy-Con is held sideways in this game, so the console shows and keeps it that way. */
+    hidSetNpadJoyHoldType(HidNpadJoyHoldType_Horizontal);
     if (R_SUCCEEDED(threadCreate(&g_watchdog, watchdog, NULL, NULL, 0x10000, 0x2C, -2)))
         threadStart(&g_watchdog);
     fprintf(stderr, "[kaihen] started, nxlink %s; game thread on core %d of mask %lx; hold + and - to quit\n",
@@ -918,8 +922,8 @@ typedef struct {
 } ExtraClock;
 
 static ExtraClock g_extra[] = {
-    {"memory", "KAIHEN_MEMORY_MHZ", PcvModuleId_EMC},
-    {"GPU", "KAIHEN_GPU_MHZ", PcvModuleId_GPU},
+    {"memory", "KAIHEN_MEMORY_MHZ", PcvModuleId_EMC, 2133},
+    {"GPU", "KAIHEN_GPU_MHZ", PcvModuleId_GPU, 561},
 };
 enum { kExtraClocks = sizeof g_extra / sizeof g_extra[0] };
 
@@ -1134,6 +1138,28 @@ uint32_t kaihen_clock_max_mhz(int i) {
 }
 uint32_t kaihen_clock_now_hz(int i) { return i >= 0 && i < kExtraClocks ? g_extra[i].now_hz : 0; }
 int kaihen_power_plugged(void) { return g_plugged > 0; }
+
+/* What a player holds, for the port menu's button names: 0 nothing, 1 handheld, 2 Pro Controller,
+ * 3 Joy-Con pair, 4 left Joy-Con alone (sideways), 5 right Joy-Con alone. Player 1 is No1 or
+ * handheld, as in the SDL driver (kaihen/patches/sdl3-kaihen.diff). */
+int kaihen_player_controller(int player) {
+    if (player < 0 || player > 7)
+        return 0;
+    const u32 style = hidGetNpadStyleSet((HidNpadIdType)(HidNpadIdType_No1 + player));
+    if (style & HidNpadStyleTag_NpadJoyLeft)
+        return 4;
+    if (style & HidNpadStyleTag_NpadJoyRight)
+        return 5;
+    if (style & HidNpadStyleTag_NpadJoyDual)
+        return 3;
+    if (style & HidNpadStyleTag_NpadFullKey)
+        return 2;
+    if (style)
+        return 2;
+    if (player == 0 && hidGetNpadStyleSet(HidNpadIdType_Handheld))
+        return 1;
+    return 0;
+}
 
 int kaihen_clock_choose_mhz(int i, uint32_t mhz) {
     if (i < 0 || i >= kExtraClocks)

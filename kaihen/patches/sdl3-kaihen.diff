@@ -360,14 +360,22 @@ new file mode 100644
 index 000000000..e68df45fa
 --- /dev/null
 +++ sdl3/src/joystick/kaihen/SDL_kaihenjoystick.c
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,299 @@
 +/*
 +  SDL joystick driver for kaiHEN (Switch 2 homebrew on libounce).
 +
-+  One always-present Switch Pro style controller: libnx's pad for player 1 or handheld (the app
-+  configures one player, standard styles). The GUID carries Nintendo's vendor and product so SDL
-+  reports a Switch Pro gamepad, and the mapping keeps Nintendo's positional layout (B = south,
-+  A = east).
++  One Switch Pro style controller per console player slot, up to four (the app configures four
++  players, standard styles): slot 1 is player 1 or handheld and is always present, so one player
++  works without anything connected; slots 2-4 come and go as controllers connect. The SDL player
++  index is the slot, which aurora uses as the game's controller port. A pair of Joy-Cons is one
++  player, as the console assigns them by default.
++
++  Each slot has its own GUID (driver data = slot) and path, so aurora's saved port preferences tell
++  identical controllers apart. The mapping keeps Nintendo's positional layout (B = south, A = east).
++
++  A single Joy-Con held sideways (set up on the HOME Menu's Change Grip/Order screen with SL + SR)
++  arrives as if held upright: libnx doesn't turn it. KJ_UpdateSingle turns it and lays it out as
++  Mario Kart Wii's sideways controls.
 +*/
 +#include "SDL_internal.h"
 +
@@ -379,6 +387,7 @@ index 000000000..e68df45fa
 +
 +enum { KJ_A, KJ_B, KJ_X, KJ_Y, KJ_L, KJ_R, KJ_ZL, KJ_ZR, KJ_PLUS, KJ_MINUS, KJ_LSTICK, KJ_RSTICK,
 +       KJ_BUTTONS };
++enum { KJ_SLOTS = 4 };
 +
 +static const u64 kj_bits[KJ_BUTTONS] = {
 +    HidNpadButton_A, HidNpadButton_B, HidNpadButton_X, HidNpadButton_Y, HidNpadButton_L,
@@ -386,21 +395,24 @@ index 000000000..e68df45fa
 +    HidNpadButton_StickL, HidNpadButton_StickR
 +};
 +
-+static SDL_JoystickID kj_instance;
-+static PadState kj_pad;
++typedef struct {
++    PadState pad;
++    SDL_JoystickID instance;  /* 0 while the slot has no controller */
++} KJ_Slot;
 +
-+static SDL_GUID KJ_GUID(void)
++static KJ_Slot kj_slots[KJ_SLOTS];
++
++static SDL_GUID KJ_GUID(int slot)
 +{
 +    return SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_VIRTUAL, 0x057e, 0x2009, 0x0100, "Nintendo",
-+                                  "Switch 2 Controller", 'k', 0);
++                                  "Switch 2 Controller", 'k', (Uint8)slot);
 +}
 +
-+static bool KJ_Init(void)
++static void KJ_AddMapping(int slot)
 +{
 +    char guid[33];
 +    char mapping[512];
-+    padInitializeDefault(&kj_pad);
-+    SDL_GUIDToString(KJ_GUID(), guid, sizeof(guid));
++    SDL_GUIDToString(KJ_GUID(slot), guid, sizeof(guid));
 +    SDL_snprintf(mapping, sizeof(mapping),
 +                 "%s,Switch 2 Controller,a:b%d,b:b%d,x:b%d,y:b%d,leftshoulder:b%d,"
 +                 "rightshoulder:b%d,lefttrigger:b%d,righttrigger:b%d,start:b%d,back:b%d,"
@@ -409,27 +421,88 @@ index 000000000..e68df45fa
 +                 guid, KJ_B, KJ_A, KJ_Y, KJ_X, KJ_L, KJ_R, KJ_ZL, KJ_ZR, KJ_PLUS, KJ_MINUS, KJ_LSTICK,
 +                 KJ_RSTICK);
 +    SDL_AddGamepadMapping(mapping);
-+    kj_instance = SDL_GetNextObjectID();
-+    SDL_PrivateJoystickAdded(kj_instance);
++}
++
++static void KJ_Attach(int slot)
++{
++    kj_slots[slot].instance = SDL_GetNextObjectID();
++    SDL_PrivateJoystickAdded(kj_slots[slot].instance);
++}
++
++static bool KJ_Init(void)
++{
++    int slot;
++    padInitialize(&kj_slots[0].pad, HidNpadIdType_No1, HidNpadIdType_Handheld);
++    for (slot = 1; slot < KJ_SLOTS; slot++) {
++        padInitialize(&kj_slots[slot].pad, (HidNpadIdType)(HidNpadIdType_No1 + slot));
++    }
++    for (slot = 0; slot < KJ_SLOTS; slot++) {
++        KJ_AddMapping(slot);
++    }
++    KJ_Attach(0);  /* player 1 is always there */
 +    return true;
 +}
 +
-+static int KJ_GetCount(void) { return 1; }
-+static void KJ_Detect(void) {}
++/* Present slots in order: device index n is the n-th present slot. */
++static int KJ_SlotForDevice(int device_index)
++{
++    int slot;
++    for (slot = 0; slot < KJ_SLOTS; slot++) {
++        if (kj_slots[slot].instance != 0 && device_index-- == 0) {
++            return slot;
++        }
++    }
++    return 0;
++}
++
++static int KJ_GetCount(void)
++{
++    int slot, count = 0;
++    for (slot = 0; slot < KJ_SLOTS; slot++) {
++        count += kj_slots[slot].instance != 0;
++    }
++    return count;
++}
++
++/* Players 2-4 appear and disappear as their controllers connect and disconnect. */
++static void KJ_Detect(void)
++{
++    int slot;
++    for (slot = 1; slot < KJ_SLOTS; slot++) {
++        bool connected;
++        padUpdate(&kj_slots[slot].pad);
++        connected = padIsConnected(&kj_slots[slot].pad);
++        if (connected && kj_slots[slot].instance == 0) {
++            KJ_Attach(slot);
++        } else if (!connected && kj_slots[slot].instance != 0) {
++            SDL_PrivateJoystickRemoved(kj_slots[slot].instance);
++            kj_slots[slot].instance = 0;
++        }
++    }
++}
++
 +static bool KJ_IsDevicePresent(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name)
 +{
 +    return false;
 +}
 +static const char *KJ_GetDeviceName(int device_index) { return "Switch 2 Controller"; }
-+static const char *KJ_GetDevicePath(int device_index) { return NULL; }
++static const char *KJ_GetDevicePath(int device_index)
++{
++    static const char *paths[KJ_SLOTS] = { "kaihen/player1", "kaihen/player2", "kaihen/player3", "kaihen/player4" };
++    return paths[KJ_SlotForDevice(device_index)];
++}
 +static int KJ_GetDeviceSteamVirtualGamepadSlot(int device_index) { return -1; }
-+static int KJ_GetDevicePlayerIndex(int device_index) { return 0; }
++static int KJ_GetDevicePlayerIndex(int device_index) { return KJ_SlotForDevice(device_index); }
 +static void KJ_SetDevicePlayerIndex(int device_index, int player_index) {}
-+static SDL_GUID KJ_GetDeviceGUID(int device_index) { return KJ_GUID(); }
-+static SDL_JoystickID KJ_GetDeviceInstanceID(int device_index) { return kj_instance; }
++static SDL_GUID KJ_GetDeviceGUID(int device_index) { return KJ_GUID(KJ_SlotForDevice(device_index)); }
++static SDL_JoystickID KJ_GetDeviceInstanceID(int device_index)
++{
++    return kj_slots[KJ_SlotForDevice(device_index)].instance;
++}
 +
 +static bool KJ_Open(SDL_Joystick *joystick, int device_index)
 +{
++    joystick->hwdata = (struct joystick_hwdata *)(uintptr_t)(KJ_SlotForDevice(device_index) + 1);
 +    joystick->nbuttons = KJ_BUTTONS;
 +    joystick->naxes = 4;
 +    joystick->nhats = 1;
@@ -455,15 +528,93 @@ index 000000000..e68df45fa
 +    return (Sint16)v;
 +}
 +
++/* One sideways Joy-Con, laid out as Mario Kart Wii's sideways controls: the stick steers, the
++   right face button accelerates (A), the bottom one goes back (B), the left one looks back (the
++   R shoulder, the game's Z), SL uses an item and SR drifts (the ZL and ZR triggers, the game's L
++   and R), and the top one does a trick: it presses the D-pad in the direction the
++   stick points (up when it's centred), fixed while the button is held, so the stick picks the
++   trick. The right Joy-Con is turned clockwise, the left one the other way. */
++static Uint8 kj_trick[KJ_SLOTS];  /* the D-pad direction a held trick button sends, or 0 */
++
++static void KJ_UpdateSingle(SDL_Joystick *joystick, int slot, PadState *pad, bool right, Uint64 now)
++{
++    const u64 held = padGetButtons(pad);
++    bool buttons[KJ_BUTTONS] = { false };
++    bool trick;
++    HidAnalogStickState stick;
++    s32 x, up;
++    int i;
++    if (right) {
++        /* Upright X, A, B, Y sit right, bottom, left, top once turned. */
++        buttons[KJ_A] = held & HidNpadButton_X;
++        buttons[KJ_B] = held & HidNpadButton_A;
++        buttons[KJ_R] = held & HidNpadButton_B;  /* look back (Z) */
++        trick = held & HidNpadButton_Y;
++        buttons[KJ_ZL] = held & HidNpadButton_RightSL;
++        buttons[KJ_ZR] = held & HidNpadButton_RightSR;
++        buttons[KJ_PLUS] = held & HidNpadButton_Plus;
++        buttons[KJ_LSTICK] = held & HidNpadButton_StickR;
++        stick = padGetStickPos(pad, 1);
++        x = stick.y;
++        up = -stick.x;
++    } else {
++        /* Upright Down, Left, Up, Right sit right, bottom, left, top once turned. */
++        buttons[KJ_A] = held & HidNpadButton_Down;
++        buttons[KJ_B] = held & HidNpadButton_Left;
++        buttons[KJ_R] = held & HidNpadButton_Up;  /* look back (Z) */
++        trick = held & HidNpadButton_Right;
++        buttons[KJ_ZL] = held & HidNpadButton_LeftSL;
++        buttons[KJ_ZR] = held & HidNpadButton_LeftSR;
++        buttons[KJ_PLUS] = held & HidNpadButton_Minus;
++        buttons[KJ_LSTICK] = held & HidNpadButton_StickL;
++        stick = padGetStickPos(pad, 0);
++        x = -stick.y;
++        up = stick.x;
++    }
++    if (!trick) {
++        kj_trick[slot] = 0;
++    } else if (kj_trick[slot] == 0) {
++        const s32 ax = x < 0 ? -x : x, aup = up < 0 ? -up : up;
++        if (ax < 9830 && aup < 9830) {  /* within 30%: centred */
++            kj_trick[slot] = SDL_HAT_UP;
++        } else if (ax > aup) {
++            kj_trick[slot] = x > 0 ? SDL_HAT_RIGHT : SDL_HAT_LEFT;
++        } else {
++            kj_trick[slot] = up > 0 ? SDL_HAT_UP : SDL_HAT_DOWN;
++        }
++    }
++    for (i = 0; i < KJ_BUTTONS; i++) {
++        SDL_SendJoystickButton(now, joystick, (Uint8)i, buttons[i]);
++    }
++    SDL_SendJoystickHat(now, joystick, 0, kj_trick[slot] ? kj_trick[slot] : SDL_HAT_CENTERED);
++    SDL_SendJoystickAxis(now, joystick, 0, KJ_Axis(x, false));
++    SDL_SendJoystickAxis(now, joystick, 1, KJ_Axis(up, true));
++    SDL_SendJoystickAxis(now, joystick, 2, 0);
++    SDL_SendJoystickAxis(now, joystick, 3, 0);
++}
++
 +static void KJ_Update(SDL_Joystick *joystick)
 +{
++    const int slot = (int)(uintptr_t)joystick->hwdata - 1;
++    PadState *pad;
 +    Uint64 now = SDL_GetTicksNS();
 +    Uint8 hat = SDL_HAT_CENTERED;
 +    u64 held;
 +    HidAnalogStickState left, right;
 +    int i;
-+    padUpdate(&kj_pad);
-+    held = padGetButtons(&kj_pad);
++    if (slot < 0 || slot >= KJ_SLOTS) {
++        return;
++    }
++    pad = &kj_slots[slot].pad;
++    padUpdate(pad);
++    {
++        const u32 style = padGetStyleSet(pad);
++        if (style & (HidNpadStyleTag_NpadJoyLeft | HidNpadStyleTag_NpadJoyRight)) {
++            KJ_UpdateSingle(joystick, slot, pad, (style & HidNpadStyleTag_NpadJoyRight) != 0, now);
++            return;
++        }
++    }
++    held = padGetButtons(pad);
 +    for (i = 0; i < KJ_BUTTONS; i++) {
 +        SDL_SendJoystickButton(now, joystick, (Uint8)i, (held & kj_bits[i]) != 0);
 +    }
@@ -472,15 +623,15 @@ index 000000000..e68df45fa
 +    if (held & HidNpadButton_Down) hat |= SDL_HAT_DOWN;
 +    if (held & HidNpadButton_Left) hat |= SDL_HAT_LEFT;
 +    SDL_SendJoystickHat(now, joystick, 0, hat);
-+    left = padGetStickPos(&kj_pad, 0);
-+    right = padGetStickPos(&kj_pad, 1);
++    left = padGetStickPos(pad, 0);
++    right = padGetStickPos(pad, 1);
 +    SDL_SendJoystickAxis(now, joystick, 0, KJ_Axis(left.x, false));
 +    SDL_SendJoystickAxis(now, joystick, 1, KJ_Axis(left.y, true));
 +    SDL_SendJoystickAxis(now, joystick, 2, KJ_Axis(right.x, false));
 +    SDL_SendJoystickAxis(now, joystick, 3, KJ_Axis(right.y, true));
 +}
 +
-+static void KJ_Close(SDL_Joystick *joystick) {}
++static void KJ_Close(SDL_Joystick *joystick) { joystick->hwdata = NULL; }
 +static void KJ_Quit(void) {}
 +static bool KJ_GetGamepadMapping(int device_index, SDL_GamepadMapping *out) { return false; }
 +

@@ -241,6 +241,46 @@ void DrawProgress(const char* title, kaikart::Progress& progress, const char* no
     ui::End();
 }
 
+// Buttons pressed since the last call, as on a Pro Controller. A single Joy-Con held sideways
+// arrives as if upright, so it's turned the way the games turn it (kaihen/patches/sdl3-kaihen.diff):
+// its stick moves the selection, its right face button chooses (A), its bottom one goes back (B),
+// and + or - exits.
+u64 PressedButtons(PadState& pad) {
+    padUpdate(&pad);
+    const u32 style = padGetStyleSet(&pad);
+    if (!(style & (HidNpadStyleTag_NpadJoyLeft | HidNpadStyleTag_NpadJoyRight))) {
+        return padGetButtonsDown(&pad);
+    }
+    static u64 previous = 0;
+    const bool right = (style & HidNpadStyleTag_NpadJoyRight) != 0;
+    const u64 held = padGetButtons(&pad);
+    u64 now = 0;
+    s32 x, up;
+    if (right) {
+        if (held & HidNpadButton_X) now |= HidNpadButton_A;
+        if (held & HidNpadButton_A) now |= HidNpadButton_B;
+        if (held & HidNpadButton_Plus) now |= HidNpadButton_Plus;
+        const HidAnalogStickState stick = padGetStickPos(&pad, 1);
+        x = stick.y;
+        up = -stick.x;
+    } else {
+        if (held & HidNpadButton_Down) now |= HidNpadButton_A;
+        if (held & HidNpadButton_Left) now |= HidNpadButton_B;
+        if (held & HidNpadButton_Minus) now |= HidNpadButton_Plus;
+        const HidAnalogStickState stick = padGetStickPos(&pad, 0);
+        x = -stick.y;
+        up = stick.x;
+    }
+    constexpr s32 kPush = 16000;  // about half way
+    if (up > kPush) now |= HidNpadButton_Up;
+    if (up < -kPush) now |= HidNpadButton_Down;
+    if (x > kPush) now |= HidNpadButton_Right;
+    if (x < -kPush) now |= HidNpadButton_Left;
+    const u64 down = now & ~previous;
+    previous = now;
+    return down;
+}
+
 template <typename Work>
 bool RunStep(const char* title, const char* note, PadState& pad, Work work) {
     struct Job {
@@ -265,7 +305,7 @@ bool RunStep(const char* title, const char* note, PadState& pad, Work work) {
     std::atomic<bool>& done = job.done;
     u64 last = 0;
     while (appletMainLoop()) {
-        padUpdate(&pad);
+        PressedButtons(pad);
         const u64 now = armGetSystemTick();
         if (now - last > armNsToTicks(200'000'000)) {  // five times a second
             DrawProgress(title, progress, note);
@@ -291,8 +331,7 @@ bool RunStep(const char* title, const char* note, PadState& pad, Work work) {
     }
     DrawProgress(title, progress, note);
     while (appletMainLoop()) {
-        padUpdate(&pad);
-        if (padGetButtonsDown(&pad) & HidNpadButton_B) break;
+        if (PressedButtons(pad) & HidNpadButton_B) break;
         svcSleepThread(16'000'000);
     }
     return false;
@@ -307,8 +346,7 @@ bool Exists(const char* path) {
 
 u64 WaitButtons(PadState& pad, u64 wanted) {
     while (appletMainLoop()) {
-        padUpdate(&pad);
-        const u64 down = padGetButtonsDown(&pad) & wanted;
+        const u64 down = PressedButtons(pad) & wanted;
         if (down) return down;
         svcSleepThread(16'000'000);
     }
@@ -472,7 +510,10 @@ int main(int argc, char** argv) {
     }
     if (romfs) romfsExit();
     RefreshStatus();
-    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    // As the games: up to four players (so the console keeps players 2-4 connected while the
+    // launcher is open), single Joy-Cons held sideways. Player 1 controls the menu.
+    padConfigureInput(4, HidNpadStyleSet_NpadStandard);
+    hidSetNpadJoyHoldType(HidNpadJoyHoldType_Horizontal);
     PadState pad;
     padInitializeDefault(&pad);
 
@@ -481,8 +522,7 @@ int main(int argc, char** argv) {
     bool starting = false, restarting = false;
     DrawMenu(selected, message);
     while (!starting && appletMainLoop()) {
-        padUpdate(&pad);
-        const u64 down = padGetButtonsDown(&pad);
+        const u64 down = PressedButtons(pad);
         if (down == 0) {
             svcSleepThread(16'000'000);
             continue;
