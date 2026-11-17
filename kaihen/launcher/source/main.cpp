@@ -50,7 +50,7 @@ struct Game {
 };
 const Game kGames[] = {
     {"Retro Rewind", "sdmc:/wiicompiled/apps/RetroRewind.nro", "RetroRewind", true},
-    {"Original Mario Kart Wii", "sdmc:/wiicompiled/apps/WiiCompiled.nro", "WiiCompiled", false},
+    {"Mario Kart Wii", "sdmc:/wiicompiled/apps/WiiCompiled.nro", "WiiCompiled", false},
 };
 constexpr int kGameCount = sizeof kGames / sizeof kGames[0];
 constexpr int kUpdatesRow = kGameCount;
@@ -123,9 +123,12 @@ void CopyMissing(const std::string& from, const std::string& to) {
 
 // --- the screen ---------------------------------------------------------------------------------------
 
-constexpr ui::Color kWhite = ui::Rgb(240, 242, 248), kGrey = ui::Rgb(150, 156, 172), kAccent = ui::Rgb(255, 112, 64),
-                    kCard = ui::Rgb(34, 38, 52), kCardSelected = ui::Rgb(46, 52, 72), kRed = ui::Rgb(255, 96, 96),
-                    kGreen = ui::Rgb(110, 214, 140);
+// Charcoal and neutral greys, one restrained accent (a muted Switch-style cyan) for the selection
+// and the progress bar.
+constexpr ui::Color kWhite = ui::Rgb(236, 237, 239), kGrey = ui::Rgb(150, 152, 156), kAccent = ui::Rgb(92, 182, 214),
+                    kCard = ui::Rgb(43, 44, 47), kCardSelected = ui::Rgb(52, 54, 58), kRed = ui::Rgb(232, 120, 112),
+                    kGreen = ui::Rgb(150, 196, 160), kLine = ui::Rgb(62, 63, 67), kFooter = ui::Rgb(24, 25, 27),
+                    kRowText = ui::Rgb(206, 207, 210), kStepText = ui::Rgb(214, 215, 218), kTrack = ui::Rgb(52, 54, 58);
 constexpr int kMargin = 64;
 
 ui::Image g_icons[kGameCount];
@@ -137,11 +140,12 @@ void Header() {
     ui::Text(kMargin, 40, 52, kWhite, "KaiKart");
     const std::string version = "v" KAIKART_VERSION;
     ui::Text(ui::kWidth - kMargin - ui::TextWidth(24, version), 58, 24, kGrey, version);
-    ui::Rect(kMargin, 108, ui::kWidth - 2 * kMargin, 2, ui::Rgb(60, 66, 86));
+    ui::Rect(kMargin, 108, ui::kWidth - 2 * kMargin, 2, kLine);
 }
 
 void Footer(const std::vector<std::pair<const char*, std::string>>& hints) {
-    ui::Rect(0, ui::kHeight - 64, ui::kWidth, 64, ui::Rgb(12, 13, 19));
+    ui::Rect(0, ui::kHeight - 64, ui::kWidth, 64, kFooter);
+    ui::Rect(0, ui::kHeight - 64, ui::kWidth, 1, kLine);
     int x = kMargin;
     for (const auto& hint : hints) x += ui::ButtonHint(x, ui::kHeight - 47, hint.first, hint.second) + 36;
 }
@@ -154,11 +158,11 @@ void DrawMenu(int selected, const std::string& message) {
         const int y = kCardTop + i * (kCardHeight + 16);
         const bool chosen = i == selected;
         ui::RoundRect(kMargin, y, width, kCardHeight, 18, chosen ? kCardSelected : kCard);
-        if (chosen) ui::RoundFrame(kMargin, y, width, kCardHeight, 18, 4, kAccent);
+        if (chosen) ui::RoundFrame(kMargin, y, width, kCardHeight, 18, 3, kAccent);
         if (g_icons[i].width) {
             ui::DrawImage(g_icons[i], kMargin + 18, y + 14, 112, 112);
         } else {
-            ui::RoundRect(kMargin + 18, y + 14, 112, 112, 12, ui::Rgb(60, 66, 86));
+            ui::RoundRect(kMargin + 18, y + 14, 112, 112, 12, kLine);
         }
         ui::Text(kMargin + 156, y + 30, 36, kWhite, kGames[i].title);
         ui::Text(kMargin + 156, y + 82, 24, g_ready[i] ? kGreen : kGrey, g_status[i]);
@@ -169,7 +173,7 @@ void DrawMenu(int selected, const std::string& message) {
         const bool chosen = index == selected;
         ui::RoundRect(kMargin, y, width, 52, 14, chosen ? kCardSelected : kCard);
         if (chosen) ui::RoundFrame(kMargin, y, width, 52, 14, 3, kAccent);
-        ui::Text(kMargin + 24, y + 12, 26, chosen ? kWhite : ui::Rgb(200, 204, 216), rows[r]);
+        ui::Text(kMargin + 24, y + 12, 26, chosen ? kWhite : kRowText, rows[r]);
     }
     if (!message.empty()) {
         ui::WrapText(kMargin, ui::kHeight - 64 - 70, width, 24, kRed, message);
@@ -188,7 +192,22 @@ void DrawPage(const std::string& title, const std::string& body, ui::Color color
     ui::End();
 }
 
-void DrawProgress(const char* title, kaikart::Progress& progress) {
+// The line at the bottom of a step's page.
+constexpr const char* kSetupNote = "This happens once. Keep the console on and the card in.";
+constexpr const char* kDownloadNote = "Keep the console on and the card in.";
+
+// A problem: what happened in red, what to do in the normal text colour, B to go back.
+void DrawError(const std::string& title, const std::string& detail, const std::string& advice) {
+    Header();
+    ui::Text(kMargin, 170, 40, kWhite, title);
+    const int width = ui::kWidth - 2 * kMargin;
+    const int used = ui::WrapText(kMargin, 240, width, 28, kRed, detail);
+    ui::WrapText(kMargin, 240 + used + 18, width, 28, kStepText, advice);
+    Footer({{"B", "Back"}});
+    ui::End();
+}
+
+void DrawProgress(const char* title, kaikart::Progress& progress, const char* note) {
     std::string step, detail, advice;
     float fraction;
     bool failed;
@@ -201,29 +220,29 @@ void DrawProgress(const char* title, kaikart::Progress& progress) {
         failed = progress.failed;
     }
     if (failed) {
-        DrawPage(title, "Stopped: " + detail + "\n\n" + advice, kRed, {{"B", "Back"}});
+        DrawError(title, detail, advice);
         return;
     }
     Header();
     const int width = ui::kWidth - 2 * kMargin;
     ui::Text(kMargin, 170, 40, kWhite, title);
-    ui::Text(kMargin, 244, 28, ui::Rgb(210, 214, 226), step);
+    ui::Text(kMargin, 244, 28, kStepText, step);
     if (!detail.empty()) ui::Text(kMargin, 284, 24, kGrey, detail);
     if (fraction >= 0) {
         constexpr int kBarTop = 350, kBarHeight = 30;
-        ui::RoundRect(kMargin, kBarTop, width, kBarHeight, kBarHeight / 2, ui::Rgb(40, 44, 60));
+        ui::RoundRect(kMargin, kBarTop, width, kBarHeight, kBarHeight / 2, kTrack);
         const int filled = int(std::min(1.0f, fraction) * width);
         if (filled > kBarHeight) ui::RoundRect(kMargin, kBarTop, filled, kBarHeight, kBarHeight / 2, kAccent);
         const std::string percent = std::to_string(int(fraction * 100)) + "%";
         ui::Text(ui::kWidth - kMargin - ui::TextWidth(26, percent), kBarTop + 44, 26, kWhite, percent);
     }
-    ui::Text(kMargin, ui::kHeight - 64 - 56, 24, kGrey, "This happens once. Keep the console on and the card in.");
+    if (note && *note) ui::Text(kMargin, ui::kHeight - 64 - 56, 24, kGrey, note);
     Footer({});
     ui::End();
 }
 
 template <typename Work>
-bool RunStep(const char* title, PadState& pad, Work work) {
+bool RunStep(const char* title, const char* note, PadState& pad, Work work) {
     struct Job {
         Work* work;
         kaikart::Progress progress;
@@ -249,7 +268,7 @@ bool RunStep(const char* title, PadState& pad, Work work) {
         padUpdate(&pad);
         const u64 now = armGetSystemTick();
         if (now - last > armNsToTicks(200'000'000)) {  // five times a second
-            DrawProgress(title, progress);
+            DrawProgress(title, progress, note);
             last = now;
         }
         if (done) break;
@@ -265,33 +284,18 @@ bool RunStep(const char* title, PadState& pad, Work work) {
             if (bar) progress.fraction = 1;
         }
         if (bar) {
-            DrawProgress(title, progress);
+            DrawProgress(title, progress, note);
             svcSleepThread(700'000'000);
         }
         return true;
     }
-    DrawProgress(title, progress);
+    DrawProgress(title, progress, note);
     while (appletMainLoop()) {
         padUpdate(&pad);
         if (padGetButtonsDown(&pad) & HidNpadButton_B) break;
         svcSleepThread(16'000'000);
     }
     return false;
-}
-
-// One game per kaiHEN session: the games note their process and the console's tick in
-// UserData/session.txt (kaihen/platform/kaihen_platform.c); hbmenu, this launcher and the games
-// share a process, so a match means a game already ran since hbmenu opened.
-bool GameRanThisSession() {
-    u64 pid = 0;
-    svcGetProcessId(&pid, CUR_PROCESS_HANDLE);
-    unsigned long long saved_pid = 0, saved_tick = 0;
-    FILE* file = std::fopen("sdmc:/wiicompiled/UserData/session.txt", "r");
-    if (!file) return false;
-    const bool same = std::fscanf(file, "%llu %llu", &saved_pid, &saved_tick) == 2 && saved_pid == pid &&
-                      saved_tick <= armGetSystemTick();
-    std::fclose(file);
-    return same;
 }
 
 bool Exists(const char* path) {
@@ -317,7 +321,7 @@ bool CheckForUpdates(PadState& pad) {
     kaikart::Release release;
     std::string error, retro_rewind;
     bool asked = false;
-    RunStep("Updates", pad, [&](kaikart::Progress& p) {
+    RunStep("Updates", "", pad, [&](kaikart::Progress& p) {
         {
             std::lock_guard<std::mutex> lock(p.mutex);
             p.step = "Checking for updates...";
@@ -327,8 +331,9 @@ bool CheckForUpdates(PadState& pad) {
         return true;
     });
     if (!asked) {
-        DrawPage("Updates", "Couldn't check for updates: " + error + ".\nCheck the console's internet connection.", kRed,
-                 {{"B", "Back"}});
+        Log("[kaikart] update check: %s\n", error.c_str());
+        DrawError("Updates", "Couldn't check for updates.",
+                  "Please check that the console is connected to the internet, then try again.");
         WaitButtons(pad, HidNpadButton_B);
         return false;
     }
@@ -353,12 +358,12 @@ bool CheckForUpdates(PadState& pad) {
     for (const Game& game : kGames) {
         if (!Exists(game.path)) continue;
         const std::string url = base + "/" + game.release_name + "-" + release.version + ".nro";
-        if (!RunStep(title.c_str(), pad,
+        if (!RunStep(title.c_str(), kDownloadNote, pad,
                      [&](kaikart::Progress& p) { return kaikart::DownloadChecked(url, sums, game.path, p); })) {
             return false;
         }
     }
-    if (!RunStep(title.c_str(), pad, [&](kaikart::Progress& p) {
+    if (!RunStep(title.c_str(), kDownloadNote, pad, [&](kaikart::Progress& p) {
             return kaikart::DownloadChecked(base + "/KaiKart-" + release.version + ".nro", sums, g_self, p);
         })) {
         return false;
@@ -375,11 +380,6 @@ bool CheckForUpdates(PadState& pad) {
 
 // Everything the game needs, then the hand-off. False (with `message`) when it can't start it.
 bool Prepare(const Game& game, PadState& pad, std::string& message) {
-    if (GameRanThisSession()) {
-        message = "A game already ran in this kaiHEN session, and starting another one crashes. "
-                  "Close KaiKart with HOME, then hold R while starting a game to open hbmenu again.";
-        return false;
-    }
     // The game's build matches this launcher's version (both come from one release); otherwise it's
     // downloaded from that release.
     const std::string build = kaikart::NroVersion(game.path);
@@ -387,7 +387,7 @@ bool Prepare(const Game& game, PadState& pad, std::string& message) {
         Log("[kaikart] %s build is '%s', getting %s\n", game.release_name, build.c_str(), KAIKART_VERSION);
         const std::string base = ReleaseBase(KAIKART_VERSION);
         const std::string file = std::string(game.release_name) + "-" KAIKART_VERSION ".nro";
-        if (!RunStep((std::string("Getting ") + game.title).c_str(), pad, [&](kaikart::Progress& p) {
+        if (!RunStep((std::string("Getting ") + game.title).c_str(), kDownloadNote, pad, [&](kaikart::Progress& p) {
                 return kaikart::DownloadChecked(base + "/" + file, base + "/SHA256SUMS", game.path, p);
             })) {
             message = build.empty() ? "That game isn't on the card yet." : "That game's build doesn't match KaiKart.";
@@ -396,7 +396,7 @@ bool Prepare(const Game& game, PadState& pad, std::string& message) {
     }
     if (!kaikart::DiscReady(kDisc)) {
         Log("[kaikart] importing the disc\n");
-        if (!RunStep("Setting up your disc", pad,
+        if (!RunStep("Setting up your disc", kSetupNote, pad,
                      [](kaikart::Progress& p) { return kaikart::ImportDisc(kRoot, kDisc, p); })) {
             message = "The disc isn't set up yet.";
             return false;
@@ -407,7 +407,7 @@ bool Prepare(const Game& game, PadState& pad, std::string& message) {
         Log("[kaikart] %s Retro Rewind %s\n", update ? "updating to" : "installing", KAIHEN_RR_VERSION);
         const std::string title = std::string(update ? "Updating Retro Rewind to " : "Installing Retro Rewind ") +
                                   KAIHEN_RR_VERSION;
-        if (!RunStep(title.c_str(), pad, [](kaikart::Progress& p) {
+        if (!RunStep(title.c_str(), update ? kDownloadNote : kSetupNote, pad, [](kaikart::Progress& p) {
                 return kaikart::InstallRetroRewind(kRetroRewind, KAIHEN_RR_VERSION, KAIHEN_RR_CODE_SHA256, p);
             })) {
             message = "Retro Rewind isn't set up yet.";
@@ -509,6 +509,7 @@ int main(int argc, char** argv) {
         Header();
         ui::Text(kMargin, 170, 40, kWhite,
                  restarting ? std::string("Starting the new KaiKart...") : std::string("Starting ") + kGames[selected].title + "...");
+        Footer({});
         ui::End();
     }
     ui::Exit();

@@ -145,10 +145,11 @@ void Begin() {
     g_pixels = static_cast<uint32_t*>(framebufferBegin(&g_framebuffer, &stride));
     g_stride = int(stride / 4);
     if (!g_pixels) return;
-    // The background: a dark blue-grey, a little lighter towards the bottom.
+    // The background: charcoal, a shade darker towards the bottom.
     for (int y = 0; y < kHeight; ++y) {
         const int t = y * 255 / kHeight;
-        Span(0, kWidth, y, Rgb(uint8_t(16 + t * 10 / 255), uint8_t(18 + t * 12 / 255), uint8_t(26 + t * 16 / 255)));
+        const uint8_t grey = uint8_t(36 - t * 8 / 255);
+        Span(0, kWidth, y, Rgb(grey, uint8_t(grey + 1), uint8_t(grey + 3)));
     }
 }
 
@@ -263,11 +264,11 @@ int WrapText(int x, int y, int width, int size, Color color, const std::string& 
 
 int ButtonHint(int x, int y, const char* button, const std::string& label) {
     constexpr int kSize = 22, kDiameter = 30;
-    const Color circle = Rgb(235, 235, 240);
+    const Color circle = Rgb(226, 227, 230);
     RoundRect(x, y, kDiameter, kDiameter, kDiameter / 2, circle);
     const int letter = TextWidth(kSize, button);
-    Text(x + (kDiameter - letter) / 2, y + 3, kSize, Rgb(24, 26, 34), button);
-    Text(x + kDiameter + 10, y + 3, kSize, Rgb(220, 222, 230), label);
+    Text(x + (kDiameter - letter) / 2, y + 3, kSize, Rgb(32, 33, 36), button);
+    Text(x + kDiameter + 10, y + 3, kSize, Rgb(210, 211, 214), label);
     return kDiameter + 10 + TextWidth(kSize, label);
 }
 

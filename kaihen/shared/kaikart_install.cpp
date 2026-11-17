@@ -53,13 +53,17 @@ void SetStep(const std::string& step, const std::string& detail = {}) {
     Log("%s %s\n", step.c_str(), detail.c_str());
 }
 
-void Fail(const std::string& detail, const std::string& advice) {
+// A problem the player sees: one sentence on what happened, one on what to do. The technical
+// reason, if any, goes to the log only.
+void Fail(const std::string& detail, const std::string& advice, const std::string& technical = {}) {
     std::lock_guard<std::mutex> lock(g_progress->mutex);
     g_progress->failed = true;
     g_progress->detail = detail;
     g_progress->advice = advice;
-    Log("failed: %s\n", detail.c_str());
+    Log("failed: %s%s%s\n", detail.c_str(), technical.empty() ? "" : " (", technical.empty() ? "" : (technical + ")").c_str());
 }
+
+constexpr const char* kCheckInternet = "Please check that the console is connected to the internet, then try again.";
 
 std::string Sha256(const fs::path& path) {
     FILE* file = std::fopen(path.c_str(), "rb");
@@ -139,14 +143,13 @@ std::vector<fs::path> FindDiscImage(const fs::path& folder) {
 bool ImportDiscImage(const fs::path& root, const fs::path& data) {
     const std::vector<fs::path> image = FindDiscImage(root);
     if (image.empty()) {
-        Fail("No Mario Kart Wii disc image in the wiicompiled folder.",
-             "Put your own PAL Mario Kart Wii disc (RMCP01) on the microSD card as an .iso or .wbfs file, in "
-             "the wiicompiled folder, then open the app again. (.rvz isn't supported yet.)");
+        Fail("There's no disc image in the wiicompiled folder.",
+             "Please put your own Mario Kart Wii PAL disc (RMCP01) in the wiicompiled folder on the microSD card, as an "
+             ".iso or .wbfs file, then try again.");
         return false;
     }
     if (FreeBytes(root) < kDiscBytes) {
-        Fail("The microSD card is too full.", "Importing the disc needs about 3 GB free. Make room, then open "
-             "the app again.");
+        Fail("The microSD card is too full.", "Setting up the disc needs about 3 GB free. Please make room, then try again.");
         return false;
     }
     SetStep("Importing " + image[0].filename().string());
@@ -162,7 +165,7 @@ bool ImportDiscImage(const fs::path& root, const fs::path& data) {
         const int fd = open(part.c_str(), O_RDONLY);
         if (fd < 0) {
             for (const int open_fd : fds) close(open_fd);
-            Fail("Couldn't open " + part.filename().string() + ".", "Check the file on the card, then try again.");
+            Fail("Couldn't open " + part.filename().string() + ".", "Please check the file on the microSD card, then try again.");
             return false;
         }
         fds.push_back(fd);
@@ -192,7 +195,13 @@ bool ImportDiscImage(const fs::path& root, const fs::path& data) {
     }
     if (result != 0) {
         fs::remove_all(partial, error);
-        Fail(message, "Use your own clean, unmodified PAL Mario Kart Wii disc (RMCP01).");
+        if (std::strstr(message, "game ID") != nullptr) {
+            Fail("This isn't a PAL Mario Kart Wii disc.", "Only the PAL version (RMCP01) works for now.", message);
+        } else {
+            Fail("Couldn't read the disc image.",
+                 "It may be damaged. Please use your own clean Mario Kart Wii PAL disc (RMCP01), dumped again if needed.",
+                 message);
+        }
         return false;
     }
 
@@ -200,14 +209,15 @@ bool ImportDiscImage(const fs::path& root, const fs::path& data) {
     if (Sha256(partial / "sys" / "main.dol") != kMainDolSha256 ||
         Sha256(partial / "files" / "rel" / "StaticR.rel") != kStaticRSha256) {
         fs::remove_all(partial, error);
-        Fail("This disc isn't a clean PAL Mario Kart Wii, revision 0.",
-             "Only an unmodified PAL disc (RMCP01, revision 0) works. Use your own dump of it.");
+        Fail("This disc's game code has been changed.",
+             "Please use an unmodified Mario Kart Wii PAL disc. Texture mods can be added separately; see the KaiKart "
+             "guide.");
         return false;
     }
     fs::remove_all(data, error);  // anything left of an older, unfinished copy
     fs::rename(partial, data, error);
     if (error) {
-        Fail("Couldn't finish the import: " + error.message() + ".", "Open the app again to retry.");
+        Fail("Couldn't finish setting up the disc.", "Please try again.", error.message());
         return false;
     }
     Log("disc imported from %s\n", image[0].c_str());
@@ -415,8 +425,8 @@ bool UnpackEntry(RunReader& reader, const ZipEntry& entry, const fs::path& folde
 
 bool DownloadRetroRewind(const fs::path& folder) {
     if (g_rr_version.empty()) {
-        Fail("No Retro Rewind folder on the card.", "Copy your RetroRewind6 folder to wiicompiled/RetroRewind on "
-             "the card, then open the app again.");
+        Fail("Retro Rewind isn't on the microSD card.",
+             "Please copy your RetroRewind6 folder to wiicompiled/RetroRewind, then try again.");
         return false;
     }
     const std::string url = RetroRewindUrl();
@@ -425,8 +435,7 @@ bool DownloadRetroRewind(const fs::path& folder) {
     uint64_t run_end = 0;
     std::string error;
     if (!ReadZipDirectory(url, entries, run_end, error)) {
-        Fail("Couldn't reach Retro Rewind's server: " + error + ".",
-             "Connect the console to the internet, then open the app again.");
+        Fail("Couldn't reach Retro Rewind's server.", kCheckInternet, error);
         return false;
     }
     const fs::path partial = folder.string() + ".partial";
@@ -446,8 +455,8 @@ bool DownloadRetroRewind(const fs::path& folder) {
     uint64_t needed = 0;
     for (size_t i = next; i < entries.size(); ++i) needed += entries[i].size;
     if (FreeBytes(folder.parent_path()) < needed + (256ull << 20)) {
-        Fail("The microSD card is too full.", "Retro Rewind needs about 2.5 GB free. Make room, then open the app "
-             "again; the download carries on where it stopped.");
+        Fail("The microSD card is too full.",
+             "Retro Rewind needs about 2.5 GB free. Please make room, then try again; the download carries on where it stopped.");
         return false;
     }
     const uint64_t run_start = entries.front().offset;
@@ -484,8 +493,9 @@ bool DownloadRetroRewind(const fs::path& folder) {
         }
     }
     if (next < entries.size()) {
-        Fail("The download stopped: " + error + ".",
-             "Check the console's internet connection, then open the app again: it carries on where it stopped.");
+        Fail("The download stopped.",
+             "Please check that the console is connected to the internet, then try again; it carries on where it stopped.",
+             error);
         return false;
     }
 
@@ -498,7 +508,7 @@ bool DownloadRetroRewind(const fs::path& folder) {
     }
     SetStep("Checking the download");
     if (!RetroRewindReadyAt(partial)) {
-        Fail("The downloaded Retro Rewind doesn't match this app.", "Open the app again to retry the download.");
+        Fail("The downloaded Retro Rewind doesn't match this version of KaiKart.", "Please try again.");
         fs::remove_all(partial, fs_error);
         return false;
     }
@@ -522,7 +532,7 @@ bool DownloadRetroRewind(const fs::path& folder) {
     fs::create_directories(folder.parent_path(), fs_error);
     fs::rename(partial, folder, fs_error);
     if (fs_error) {
-        Fail("Couldn't finish installing Retro Rewind: " + fs_error.message() + ".", "Open the app again to retry.");
+        Fail("Couldn't finish installing Retro Rewind.", "Please try again.", fs_error.message());
         return false;
     }
     Log("Retro Rewind %s installed\n", g_rr_version.c_str());
@@ -744,7 +754,7 @@ bool DownloadChecked(const std::string& url, const std::string& sums_url, const 
     SetStep("Downloading " + file_name);
     std::string sums, expected, error;
     if (!FetchString(sums_url, sums, error)) {
-        Fail("Couldn't get the release's checksums: " + error + ".", "Check the console's internet connection.");
+        Fail("Couldn't reach GitHub.", kCheckInternet, error);
         return false;
     }
     for (const auto& line : Lines(sums)) {
@@ -753,7 +763,7 @@ bool DownloadChecked(const std::string& url, const std::string& sums_url, const 
         }
     }
     if (expected.empty()) {
-        Fail("The release's checksums don't list " + file_name + ".", "Try again later.");
+        Fail("This update is missing " + file_name + ".", "Please try again later.");
         return false;
     }
     for (auto& c : expected) c = char(std::toupper(static_cast<unsigned char>(c)));
@@ -765,8 +775,11 @@ bool DownloadChecked(const std::string& url, const std::string& sums_url, const 
     if (!out || !get.Open(url, 0, UINT64_MAX, error)) {
         if (out) std::fclose(out);
         std::remove(partial.c_str());
-        Fail("Couldn't download " + file_name + ": " + (out ? error : "can't write to the card") + ".",
-             "Check the console's internet connection.");
+        if (out) {
+            Fail("Couldn't download " + file_name + ".", kCheckInternet, error);
+        } else {
+            Fail("Couldn't write to the microSD card.", "Please check that it has room, then try again.");
+        }
         return false;
     }
     static std::vector<char> file_buffer(1 << 18);
@@ -808,7 +821,7 @@ bool DownloadChecked(const std::string& url, const std::string& sums_url, const 
     }
     if (!ok) {
         std::remove(partial.c_str());
-        Fail(file_name + " didn't download: " + error + ".", "Try again later.");
+        Fail(file_name + " didn't download correctly.", "Please try again.", error);
         return false;
     }
     // The new file takes the old one's place; the old one stays until the new one is in.
@@ -818,7 +831,7 @@ bool DownloadChecked(const std::string& url, const std::string& sums_url, const 
     if (std::rename(partial.c_str(), path.c_str()) != 0) {
         if (had_old) std::rename(old.c_str(), path.c_str());
         std::remove(partial.c_str());
-        Fail("Couldn't put " + file_name + " in place on the card.", "Try again.");
+        Fail("Couldn't put " + file_name + " in place on the microSD card.", "Please try again.");
         return false;
     }
     std::remove(old.c_str());
