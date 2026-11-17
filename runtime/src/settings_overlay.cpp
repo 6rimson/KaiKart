@@ -1840,9 +1840,10 @@ bool g_consoleReturnRequested = false;
 // Runs between frames. The launcher lives in this process, so graphics has to shut down for real:
 // what it keeps allocated would still be allocated for the next launch.
 #if defined(MKW_KAIHEN)
-// kaiHEN: hbloader loads hbmenu again in this process once the game hands back control, so the
-// same shutdown applies; the return itself is kaihen/platform/kaihen_platform.c's.
-extern "C" [[noreturn]] void kaihen_return_to_hbmenu(void);
+// kaiHEN: the game quits to the HOME Menu (closing the app, as HOME does) instead of returning to
+// hbmenu: opening a game a second time in one kaiHEN session crashes, and so can returning to
+// hbmenu after online play. Closing with HOME and reopening hbmenu starts a clean session.
+extern "C" [[noreturn]] void kaihen_quit(const char* why);
 extern "C" int kaihen_return_requested(void);
 #endif
 [[noreturn]] void ConsoleReturnToLauncher() noexcept {
@@ -1871,7 +1872,7 @@ extern "C" int kaihen_return_requested(void);
     finished.store(true, std::memory_order_release);
     timeout.join();
 #if defined(MKW_KAIHEN)
-    kaihen_return_to_hbmenu();
+    kaihen_quit("quit to the HOME Menu");
 #endif
     std::_Exit(EXIT_SUCCESS);
 }
@@ -2122,7 +2123,7 @@ void DrawConsoleMenu() {
         row(rows - 1, g_consoleLinkLost   ? "Launcher link lost: quit with HOME"
                       : g_consoleExitArmed ? "Press A again to quit"
 #if defined(MKW_KAIHEN)
-                                           : "Return to hbmenu");
+                                           : "Quit to HOME Menu");
 #else
                                            : "Return to launcher");
 #endif

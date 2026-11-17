@@ -219,6 +219,21 @@ bool RunStep(const char* title, PadState& pad, Work work) {
     return false;
 }
 
+// One game per kaiHEN session: the games note their process and the console's tick in
+// UserData/session.txt (kaihen/platform/kaihen_platform.c); hbmenu, this launcher and the games
+// share a process, so a match means a game already ran since hbmenu opened.
+bool GameRanThisSession() {
+    u64 pid = 0;
+    svcGetProcessId(&pid, CUR_PROCESS_HANDLE);
+    unsigned long long saved_pid = 0, saved_tick = 0;
+    FILE* file = std::fopen("sdmc:/wiicompiled/UserData/session.txt", "r");
+    if (!file) return false;
+    const bool same = std::fscanf(file, "%llu %llu", &saved_pid, &saved_tick) == 2 && saved_pid == pid &&
+                      saved_tick <= armGetSystemTick();
+    std::fclose(file);
+    return same;
+}
+
 bool Exists(const char* path) {
     struct stat st;
     return stat(path, &st) == 0;
@@ -226,6 +241,11 @@ bool Exists(const char* path) {
 
 // Everything the game needs, then the hand-off. False (with `message`) when it can't start it.
 bool Prepare(const Game& game, PadState& pad, std::string& message) {
+    if (GameRanThisSession()) {
+        message = "A game already ran in this kaiHEN session, and starting another one crashes.\n"
+                  "  Close KaiKart with HOME, then hold R while starting a game to open hbmenu again.";
+        return false;
+    }
     if (!Exists(game.path)) {
         message = "That game isn't on the card yet (wiicompiled/apps).";
         return false;

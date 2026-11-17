@@ -77,7 +77,7 @@ void CenteredText(const std::string& text, float y, float wrap) {
     ImGui::PopTextWrapPos();
 }
 
-void DrawMessage(const std::vector<std::string>& lines) {
+void DrawMessage(const std::string& title, const std::vector<std::string>& lines) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->Pos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(viewport->Size, ImGuiCond_Always);
@@ -89,14 +89,14 @@ void DrawMessage(const std::vector<std::string>& lines) {
         const float wrap = viewport->Size.x * 0.8f;
         float y = viewport->Size.y * 0.3f;
         ImGui::SetWindowFontScale(1.25f);
-        CenteredText(std::string(RuntimeProduct::Active().displayName) + " isn't ready yet", y, wrap);
+        CenteredText(title, y, wrap);
         y += ImGui::GetTextLineHeightWithSpacing() * 2;
         ImGui::SetWindowFontScale(1.0f);
         for (const auto& line : lines) {
             CenteredText(line, y, wrap);
             y = ImGui::GetCursorPosY() + 12;
         }
-        CenteredText("Hold + and - to return to hbmenu.", viewport->Size.y * 0.85f, wrap);
+        CenteredText("Hold + and - to quit.", viewport->Size.y * 0.85f, wrap);
     }
     ImGui::End();
     ImGui::PopStyleColor();
@@ -105,10 +105,11 @@ void DrawMessage(const std::vector<std::string>& lines) {
 }  // namespace
 
 void Run() {
+    const std::string title = std::string(RuntimeProduct::Active().displayName) + " isn't ready yet";
+    std::vector<std::string> missing;
     const fs::path data = RuntimeConfigFile::ResolvedDvdRoot();
     const fs::path retro_rewind =
         RuntimeProduct::IsRetroRewind() ? fs::path(RuntimeConfigFile::RetroRewindRoot()) : fs::path{};
-    std::vector<std::string> missing;
     if (!data.empty() && !DiscReady(data)) {
         missing.push_back("Your disc isn't set up on the card.");
     }
@@ -127,7 +128,7 @@ void Run() {
         }
         aurora_update();
         if (aurora_begin_frame()) {
-            DrawMessage(missing);
+            DrawMessage(title, missing);
             aurora_end_frame();
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(16));

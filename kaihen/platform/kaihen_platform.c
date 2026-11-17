@@ -411,7 +411,7 @@ void kaihen_return_to_hbmenu(void) {
 }
 
 /* Until the game handles the console's applet messages (milestone 3): a thread that services the
- * applet. Holding + and - for a second asks the game to return to hbmenu between frames; if no
+ * applet. Holding + and - for a second asks the game to quit between frames; if no
  * frame comes within 3 seconds, it quits to the home menu instead. It ends when a return starts. */
 static void watchdog(void *arg) {
     (void)arg;
@@ -587,10 +587,13 @@ static void card_setup(void) {
     romfsUnmount("romfs");
 }
 
+static void one_game_per_session(void);
+
 void userAppInit(void) {
     copy_thread_pointer();
     cores_start();
     card_setup();
+    one_game_per_session();
     /* libnx's defaults, with TCP receive buffers that may grow to 1 MiB (from 256 KiB): the
      * first-launch Retro Rewind download (about 1.9 GB) was limited by it on Wi-Fi. */
     SocketInitConfig sockets = *socketGetDefaultInitConfig();
@@ -1291,6 +1294,54 @@ void __wrap_exit(int status) {
 
 void __wrap__exit(int status) {
     quit_now(status == 0 ? "_exit(0)" : status == 1 ? "_exit(1)" : "_exit(failure)");
+}
+
+/* --- one game per kaiHEN session --------------------------------------------------------------- */
+/* Opening a game a second time in one kaiHEN session crashes (its cause is still unknown); closing
+ * with HOME and reopening hbmenu starts a new session, in a new process. hbmenu, the KaiKart
+ * launcher and the games all run in the same process, so a game notes its process ID and the
+ * console's tick in UserData/session.txt; a game (or the launcher) starting later in the same
+ * process finds them and says so instead of crashing. The tick tells a new boot apart, where
+ * process IDs start over. kaihen_setup.cpp and kaihen/launcher read and write it. */
+int kaihen_session_had_game(int mark) {
+    u64 pid = 0;
+    svcGetProcessId(&pid, CUR_PROCESS_HANDLE);
+    const u64 now = armGetSystemTick();
+    unsigned long long saved_pid = 0, saved_tick = 0;
+    FILE *file = fopen(KAIHEN_ROOT "/UserData/session.txt", "r");
+    int same = 0;
+    if (file) {
+        same = fscanf(file, "%llu %llu", &saved_pid, &saved_tick) == 2 && saved_pid == pid && saved_tick <= now;
+        fclose(file);
+    }
+    if (mark && !same && (file = fopen(KAIHEN_ROOT "/UserData/session.txt", "w"))) {
+        fprintf(file, "%llu %llu\n", (unsigned long long)pid, (unsigned long long)now);
+        fclose(file);
+    }
+    return same;
+}
+
+/* At the very start (the second launch's crash comes as graphics start): on a second game in this
+ * session, a message on libnx's text console, then quit to the HOME Menu. */
+static void one_game_per_session(void) {
+    if (!kaihen_session_had_game(1))
+        return;
+    consoleInit(NULL);
+    printf("\n  A game already ran in this kaiHEN session, and starting another one crashes.\n\n"
+           "  Close it with HOME, then hold R while starting a game to open hbmenu again.\n\n\n"
+           "  Press A to quit to the HOME Menu.\n");
+    consoleUpdate(NULL);
+    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    PadState pad;
+    padInitializeDefault(&pad);
+    while (appletMainLoop()) {
+        padUpdate(&pad);
+        if (padGetButtonsDown(&pad) & (HidNpadButton_A | HidNpadButton_B | HidNpadButton_Plus))
+            break;
+        svcSleepThread(16 * 1000 * 1000);
+    }
+    consoleExit(NULL);
+    quit_now("a game already ran in this kaiHEN session");
 }
 
 /* The card's file system has no permissions, and libnx's chmod and fchmod return ENOSYS. libstdc++'s
