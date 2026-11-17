@@ -24,7 +24,7 @@ copy_repo() {
   mkdir -p "$1"
   rsync -a --delete --exclude .git --exclude generated --exclude build --exclude "build-*" \
     --exclude Assets --exclude PulsarPacks --exclude kaihen/dist --exclude kaihen/deps \
-    --exclude kaihen/platform/kaihen_rr_pin.h \
+    --exclude kaihen/platform/kaihen_build_info.h \
     --exclude "translator/*/*/bin" --exclude "translator/*/*/obj" /host/ "$1/"
 }
 
@@ -102,26 +102,29 @@ sync_tree() {
   }
   copy_repo "$SRC"
   ln -sfn "$WORK_SRC/generated" "$SRC/generated"
-  rr_pin
+  build_info
   patch -p1 -s -N -d "$SRC/aurora-main" -i "$PATCHES/$(pin aurora patch)"
 }
 
-# The Retro Rewind release this build is for (version and Code.pul's SHA-256), in
-# kaihen/platform/kaihen_rr_pin.h: at its first launch the app downloads that release from Retro
-# Rewind's server when the card doesn't have it (kaihen_setup.cpp). Written only when it changes.
-rr_pin() {
-  local pin="$SRC/kaihen/platform/kaihen_rr_pin.h" rr=/host/PulsarPacks/completed/RetroRewind/RetroRewind6 text
+# What the app knows about itself, in kaihen/platform/kaihen_build_info.h (written only when it
+# changes): its version, the repository its updates come from (KAIHEN_UPDATE_REPO), and the Retro
+# Rewind release it is built for (version and Code.pul's SHA-256), which it downloads from Retro
+# Rewind's server when the card doesn't have it (kaihen_setup.cpp).
+VERSION="${KAIHEN_VERSION:-0.3.1}"
+build_info() {
+  local info="$SRC/kaihen/platform/kaihen_build_info.h" rr=/host/PulsarPacks/completed/RetroRewind/RetroRewind6 text
+  text="#define KAIHEN_APP_VERSION \"$VERSION\"
+#define KAIHEN_UPDATE_REPO \"${KAIHEN_UPDATE_REPO:-6rimson/WiiCompiled-Switch2}\""
   if [[ "$PRODUCT" == RetroRewind ]]; then
     [[ -f "$rr/Binaries/Code.pul" && -f "$rr/version.txt" ]] || {
       echo "Missing $rr: see kaihen/README.md, step 2" >&2
       exit 1
     }
-    text="#define KAIHEN_RR_VERSION \"$(tr -d '[:space:]' < "$rr/version.txt")\"
+    text+="
+#define KAIHEN_RR_VERSION \"$(tr -d '[:space:]' < "$rr/version.txt")\"
 #define KAIHEN_RR_CODE_SHA256 \"$(sha256sum "$rr/Binaries/Code.pul" | cut -c1-64 | tr a-f A-F)\""
-  else
-    text="/* plain Mario Kart Wii: no Retro Rewind */"
   fi
-  [[ -f "$pin" && "$(cat "$pin")" == "$text" ]] || printf '%s\n' "$text" > "$pin"
+  [[ -f "$info" && "$(cat "$info")" == "$text" ]] || printf '%s\n' "$text" > "$info"
 }
 
 # Dawn and SDL3 from the work volume (already patched by sources).
@@ -189,7 +192,7 @@ build() {
   local title="WiiCompiled" icon="/host/kaihen/icon-$PRODUCT.jpg"
   [[ "$PRODUCT" == RetroRewind ]] && title="Retro Rewind"
   [[ -f "$icon" && -z "${KAIHEN_RELEASE:-}" ]] || icon="/host/kaihen/icons/$PRODUCT.jpg"
-  nacptool --create "$title" "6rimson" "${KAIHEN_VERSION:-0.3.1}" "$OUT/$PRODUCT.nacp"
+  nacptool --create "$title" "6rimson" "$VERSION" "$OUT/$PRODUCT.nacp"
   # The wiicompiled folder's own small files, without any game files: in the app (romfs), which
   # copies what a card lacks at its first launch (kaihen_platform.c, card_setup), and in
   # kaihen/dist/card, the card's layout to copy by hand (kaihen/README.md).

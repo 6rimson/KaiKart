@@ -16,11 +16,17 @@
 #include <cryptopp/hex.h>
 #include <cryptopp/sha.h>
 #include <imgui.h>
+#include <mbedtls/sha256.h>
 #include <zlib.h>
 
-// The Retro Rewind release the app's translation was made from (kaihen/build.sh writes it).
-#if __has_include("kaihen_rr_pin.h")
-#include "kaihen_rr_pin.h"
+// The app's version, where its updates come from, and the Retro Rewind release its translation
+// was made from (kaihen/build.sh writes it).
+#if __has_include("kaihen_build_info.h")
+#include "kaihen_build_info.h"
+#endif
+#ifndef KAIHEN_APP_VERSION
+#define KAIHEN_APP_VERSION "0.0.0"
+#define KAIHEN_UPDATE_REPO ""
 #endif
 #ifndef KAIHEN_RR_VERSION
 #define KAIHEN_RR_VERSION ""
@@ -32,6 +38,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fcntl.h>
@@ -43,6 +50,8 @@
 #include <vector>
 
 extern "C" int kaihen_return_requested(void);
+extern "C" uint32_t kaihen_setup_buttons(void);  // kaihen_platform.c
+extern "C" const char* kaihen_app_path(void);
 namespace settings_overlay {
 [[noreturn]] void ConsoleReturnToLauncher() noexcept;  // settings_overlay.cpp
 }
@@ -566,18 +575,15 @@ void CenteredText(const std::string& text, float y, float wrap) {
     ImGui::PopTextWrapPos();
 }
 
-void Draw() {
-    std::string step, detail, advice;
-    float progress;
-    bool failed;
-    {
-        std::lock_guard<std::mutex> lock(g_status.mutex);
-        step = g_status.step;
-        detail = g_status.detail;
-        advice = g_status.advice;
-        progress = g_status.progress;
-        failed = g_status.failed;
-    }
+// One screen: a title, lines of text, an optional progress bar, and a line at the bottom.
+struct Page {
+    std::string title;
+    std::vector<std::string> lines;  // the first is the step, the rest details
+    float progress = -1;
+    std::string footer;
+};
+
+void DrawPage(const Page& page) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->Pos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(viewport->Size, ImGuiCond_Always);
@@ -589,35 +595,321 @@ void Draw() {
         const float wrap = viewport->Size.x * 0.8f;
         float y = viewport->Size.y * 0.3f;
         ImGui::SetWindowFontScale(1.25f);
-        CenteredText(std::string(RuntimeProduct::Active().displayName) + ": first-time setup", y, wrap);
+        CenteredText(page.title, y, wrap);
         y += ImGui::GetTextLineHeightWithSpacing() * 2;
         ImGui::SetWindowFontScale(1.0f);
-        CenteredText(failed ? "Setup stopped" : step, y, wrap);
-        y = ImGui::GetCursorPosY() + 8;
-        if (!detail.empty()) {
-            CenteredText(detail, y, wrap);
+        for (const auto& line : page.lines) {
+            if (line.empty()) {
+                y += ImGui::GetTextLineHeight();  // a gap
+                continue;
+            }
+            CenteredText(line, y, wrap);
             y = ImGui::GetCursorPosY() + 8;
         }
-        if (!failed && progress >= 0) {
+        if (page.progress >= 0) {
             ImGui::SetCursorPos(ImVec2((viewport->Size.x - wrap * 0.6f) * 0.5f, y + 8));
             char label[16];
-            std::snprintf(label, sizeof label, "%d%%", int(progress * 100));
-            ImGui::ProgressBar(progress, ImVec2(wrap * 0.6f, 0), label);
-            y = ImGui::GetCursorPosY() + 8;
+            std::snprintf(label, sizeof label, "%d%%", int(page.progress * 100));
+            ImGui::ProgressBar(page.progress, ImVec2(wrap * 0.6f, 0), label);
         }
-        if (failed) {
-            CenteredText(advice, y + 16, wrap);
-            y = ImGui::GetCursorPosY() + 24;
-            CenteredText("Hold + and - to return to hbmenu.", y, wrap);
-        } else {
-            CenteredText("This happens once. Keep the console on and the card in.", viewport->Size.y * 0.85f, wrap);
+        if (!page.footer.empty()) {
+            CenteredText(page.footer, viewport->Size.y * 0.85f, wrap);
         }
     }
     ImGui::End();
     ImGui::PopStyleColor();
 }
 
+std::string ProductName() { return std::string(RuntimeProduct::Active().displayName); }
+
+// The setup screen, from g_status.
+void Draw() {
+    Page page;
+    page.title = ProductName() + ": first-time setup";
+    {
+        std::lock_guard<std::mutex> lock(g_status.mutex);
+        if (g_status.failed) {
+            page.lines = {"Setup stopped", g_status.detail, "", g_status.advice};
+            page.footer = "Hold + and - to return to hbmenu.";
+        } else {
+            page.lines = {g_status.step, g_status.detail};
+            page.progress = g_status.progress;
+            page.footer = "This happens once. Keep the console on and the card in.";
+        }
+    }
+    DrawPage(page);
+}
+
+// --- Updates -------------------------------------------------------------------------------------
+// B on the game's startup screen opens the update screen (UpdatesFrame). It looks for a newer
+// release of this app on GitHub (KAIHEN_UPDATE_REPO) and Retro Rewind's latest version on its
+// server. A new app replaces this one's .nro; it brings its matching Retro Rewind at its next start.
+
+// "0.4.1" -> {0, 4, 1}; compares like versions.
+std::vector<int> Version(const std::string& text) {
+    std::vector<int> parts;
+    size_t at = 0;
+    while (at < text.size() && std::isdigit(static_cast<unsigned char>(text[at]))) {
+        parts.push_back(std::atoi(text.c_str() + at));
+        while (at < text.size() && std::isdigit(static_cast<unsigned char>(text[at]))) ++at;
+        if (at < text.size() && text[at] == '.') ++at; else break;
+    }
+    return parts;
+}
+bool Newer(const std::string& a, const std::string& b) { return Version(a) > Version(b); }
+
+bool FetchText(const std::string& url, std::string& text, std::string& error) {
+    std::vector<uint8_t> bytes;
+    if (!Fetch(url, 0, UINT64_MAX, bytes, nullptr, error)) return false;
+    text.assign(bytes.begin(), bytes.end());
+    return true;
+}
+
+struct Updates {
+    std::mutex mutex;
+    enum class Phase { Checking, Checked, Downloading, Updated, Failed } phase = Phase::Checking;
+    std::vector<std::string> lines;
+    float progress = -1;
+    std::string latest;        // a newer app's version, or empty
+    std::string download_url;  // its .nro
+    std::string sums_url;      // its release's SHA256SUMS
+};
+Updates g_updates;
+
+void SetUpdates(Updates::Phase phase, std::vector<std::string> lines) {
+    std::lock_guard<std::mutex> lock(g_updates.mutex);
+    g_updates.phase = phase;
+    g_updates.lines = std::move(lines);
+    g_updates.progress = -1;
+}
+
+void CheckForUpdates() {
+    const std::string product = std::string(RuntimeProduct::IsRetroRewind() ? "RetroRewind" : "WiiCompiled");
+    std::string error, latest, download_url, sums_url;
+    // The releases' assets: .../releases/download/<tag>/<product>-<version>.nro
+    std::string releases;
+    if (KAIHEN_UPDATE_REPO[0] == '\0' ||
+        !FetchText(std::string("https://api.github.com/repos/") + KAIHEN_UPDATE_REPO + "/releases?per_page=20",
+                   releases, error)) {
+        SetUpdates(Updates::Phase::Failed, {"Couldn't check for updates: " + (error.empty() ? "no address" : error) + ".",
+                                            "Check the console's internet connection."});
+        return;
+    }
+    const std::string key = "\"browser_download_url\":";
+    const std::string suffix_start = "/" + product + "-";
+    for (size_t at = releases.find(key); at != std::string::npos; at = releases.find(key, at + 1)) {
+        const size_t begin = releases.find('"', at + key.size()) + 1, end = releases.find('"', begin);
+        if (begin == 0) break;
+        if (end == std::string::npos) break;
+        const std::string url = releases.substr(begin, end - begin);
+        const size_t name = url.rfind(suffix_start);
+        if (name == std::string::npos || url.size() < 4 || url.compare(url.size() - 4, 4, ".nro") != 0) continue;
+        const std::string version = url.substr(name + suffix_start.size(), url.size() - 4 - name - suffix_start.size());
+        if (Newer(version, KAIHEN_APP_VERSION) && (latest.empty() || Newer(version, latest))) {
+            latest = version;
+            download_url = url;
+            sums_url = url.substr(0, url.rfind('/')) + "/SHA256SUMS";
+        }
+    }
+    std::vector<std::string> lines;
+    if (!latest.empty()) {
+        lines = {ProductName() + " " + latest + " is available. You have " KAIHEN_APP_VERSION ".", "",
+                 "Press A to download it."};
+    } else {
+        lines = {"This app is up to date (" KAIHEN_APP_VERSION ")."};
+    }
+    if (RuntimeProduct::IsRetroRewind() && KAIHEN_RR_VERSION[0] != '\0') {
+        std::string versions, newest;
+        if (FetchText("https://update.rwfc.net/RetroRewind/RetroRewindVersion.txt", versions, error)) {
+            size_t start = 0;
+            while (start < versions.size()) {
+                size_t end = versions.find('\n', start);
+                if (end == std::string::npos) end = versions.size();
+                const std::string version = versions.substr(start, versions.find(' ', start) - start);
+                if (newest.empty() || Newer(version, newest)) newest = version;
+                start = end + 1;
+            }
+        }
+        if (!newest.empty() && Newer(newest, KAIHEN_RR_VERSION) && latest.empty()) {
+            lines.push_back("");
+            lines.push_back("Retro Rewind " + newest + " is out. It needs a newer version of this app, which isn't "
+                            "out yet. This one plays Retro Rewind " KAIHEN_RR_VERSION ".");
+        } else if (latest.empty()) {
+            lines.push_back("Retro Rewind " KAIHEN_RR_VERSION " is the latest.");
+        }
+    }
+    std::lock_guard<std::mutex> lock(g_updates.mutex);
+    g_updates.phase = Updates::Phase::Checked;
+    g_updates.lines = std::move(lines);
+    g_updates.latest = latest;
+    g_updates.download_url = download_url;
+    g_updates.sums_url = sums_url;
+}
+
+void DownloadUpdate() {
+    std::string url, sums_url, latest, error;
+    {
+        std::lock_guard<std::mutex> lock(g_updates.mutex);
+        url = g_updates.download_url;
+        sums_url = g_updates.sums_url;
+        latest = g_updates.latest;
+    }
+    const std::string app = kaihen_app_path();
+    if (app.empty()) {
+        SetUpdates(Updates::Phase::Failed, {"Couldn't find this app's file on the card."});
+        return;
+    }
+    const std::string file_name = url.substr(url.rfind('/') + 1);
+    SetUpdates(Updates::Phase::Downloading, {"Downloading " + ProductName() + " " + latest, file_name});
+    std::string sums, expected;
+    if (!FetchText(sums_url, sums, error)) {
+        SetUpdates(Updates::Phase::Failed, {"Couldn't download the update's checksums: " + error + "."});
+        return;
+    }
+    for (size_t at = sums.find(file_name); at != std::string::npos; at = sums.find(file_name, at + 1)) {
+        const size_t line = sums.rfind('\n', at) == std::string::npos ? 0 : sums.rfind('\n', at) + 1;
+        if (at >= line + 64) expected = Lower(sums.substr(line, 64));
+        break;
+    }
+    if (expected.size() != 64) {
+        SetUpdates(Updates::Phase::Failed, {"The update's checksums don't list " + file_name + "."});
+        return;
+    }
+    const std::string partial = app + ".partial";
+    FILE* out = std::fopen(partial.c_str(), "wb");
+    kaihen_https::Get get;
+    if (!out || !get.Open(url, 0, UINT64_MAX, error)) {
+        if (out) std::fclose(out);
+        std::remove(partial.c_str());
+        SetUpdates(Updates::Phase::Failed, {"Couldn't download the update: " + (out ? error : "can't write to the card") + "."});
+        return;
+    }
+    static std::vector<char> file_buffer(1 << 18);
+    std::setvbuf(out, file_buffer.data(), _IOFBF, file_buffer.size());
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+    std::vector<uint8_t> buffer(1 << 16);
+    uint64_t done = 0;
+    const uint64_t length = get.Length();
+    int64_t n;
+    bool ok = true;
+    while ((n = get.Read(buffer.data(), buffer.size(), error)) > 0) {
+        mbedtls_sha256_update(&sha, buffer.data(), size_t(n));
+        if (std::fwrite(buffer.data(), 1, size_t(n), out) != size_t(n)) {
+            ok = false;
+            error = "writing to the card failed (is it full?)";
+            break;
+        }
+        done += uint64_t(n);
+        if (length != UINT64_MAX && length != 0) {
+            std::lock_guard<std::mutex> lock(g_updates.mutex);
+            g_updates.progress = float(double(done) / double(length));
+        }
+    }
+    if (ok && n < 0) ok = false;
+    if (std::fclose(out) != 0 && ok) {
+        ok = false;
+        error = "writing to the card failed (is it full?)";
+    }
+    unsigned char digest[32];
+    mbedtls_sha256_finish(&sha, digest);
+    mbedtls_sha256_free(&sha);
+    char hex[65];
+    for (int i = 0; i < 32; ++i) std::snprintf(hex + i * 2, 3, "%02x", digest[i]);
+    if (ok && expected != hex) {
+        ok = false;
+        error = "the download doesn't match its checksum";
+    }
+    if (!ok) {
+        std::remove(partial.c_str());
+        SetUpdates(Updates::Phase::Failed, {"The update didn't download: " + error + ".", "Try again later."});
+        return;
+    }
+    // The new file takes the app's place; the old one stays until the new one is in.
+    const std::string old = app + ".old";
+    std::remove(old.c_str());
+    if (std::rename(app.c_str(), old.c_str()) != 0 || std::rename(partial.c_str(), app.c_str()) != 0) {
+        std::rename(old.c_str(), app.c_str());
+        std::remove(partial.c_str());
+        SetUpdates(Updates::Phase::Failed, {"Couldn't replace the app's file on the card."});
+        return;
+    }
+    std::remove(old.c_str());
+    RT_LOGF("setup", "updated %s to %s\n", app.c_str(), latest.c_str());
+    SetUpdates(Updates::Phase::Updated,
+               {"Updated to " + latest + ".",
+                "To use it, hold + and - to return to hbmenu, restart kaiHEN, and open the app again."
+                + std::string(RuntimeProduct::IsRetroRewind() ? " It gets its Retro Rewind then." : "")});
+    {
+        std::lock_guard<std::mutex> lock(g_updates.mutex);
+        g_updates.progress = 1;
+    }
+}
+
+// The update screen's state on the game thread.
+bool g_updates_open = false;
+std::thread g_updates_worker;
+std::atomic<bool> g_updates_working{false};  // the worker hasn't finished
+
+void StartUpdatesWork(void (*work)()) {
+    if (g_updates_worker.joinable()) {
+        // A check left while it hung goes on alone; its answer is as good as the new one's.
+        if (g_updates_working.load()) g_updates_worker.detach(); else g_updates_worker.join();
+    }
+    g_updates_working = true;
+    g_updates_worker = std::thread([work] {
+        work();
+        g_updates_working = false;
+    });
+}
+
 }  // namespace
+
+bool UpdatesOpen() { return g_updates_open; }
+
+void UpdatesFrame(bool startup_screen_visible) {
+    const uint32_t buttons = kaihen_setup_buttons();
+    if (!g_updates_open) {
+        if (startup_screen_visible && (buttons & 2)) {
+            RT_LOGF("setup", "update screen\n");
+            g_updates_open = true;
+            SetUpdates(Updates::Phase::Checking, {});
+            StartUpdatesWork(CheckForUpdates);
+        }
+        return;
+    }
+    Page page;
+    page.title = ProductName() + ": updates";
+    Updates::Phase phase;
+    bool can_download;
+    {
+        std::lock_guard<std::mutex> lock(g_updates.mutex);
+        phase = g_updates.phase;
+        page.lines = phase == Updates::Phase::Checking ? std::vector<std::string>{"Checking for updates..."}
+                                                       : g_updates.lines;
+        if (phase == Updates::Phase::Downloading) page.progress = g_updates.progress;
+        can_download = phase == Updates::Phase::Checked && !g_updates.latest.empty();
+    }
+    // A check can be left (with no internet, connecting may take a minute); a download can't.
+    if (phase == Updates::Phase::Checking) {
+        page.footer = "B: back to the game.";
+        DrawPage(page);
+        if (buttons & 2) g_updates_open = false;
+        return;
+    }
+    const bool busy = phase == Updates::Phase::Downloading;
+    page.footer = busy ? "Keep the console on." : "B: back to the game.";
+    DrawPage(page);
+    if (busy) return;
+    if (can_download && (buttons & 1)) {
+        SetUpdates(Updates::Phase::Downloading, {"Starting the download..."});
+        StartUpdatesWork(DownloadUpdate);
+    } else if (buttons & 2) {
+        g_updates_open = false;
+    }
+}
+
 
 void Run() {
     const fs::path root = RuntimeConfigFile::kaihen_root_directory();
@@ -626,28 +918,27 @@ void Run() {
         RuntimeProduct::IsRetroRewind() ? fs::path(RuntimeConfigFile::RetroRewindRoot()) : fs::path{};
     const bool disc_ready = data.empty() || DiscReady(data);
     const bool retro_rewind_ready = retro_rewind.empty() || RetroRewindReady(retro_rewind);
-    if (disc_ready && retro_rewind_ready) {
-        return;
-    }
-    RT_LOGF("setup", "first-time setup: disc %s%s, Retro Rewind %s%s (app built for %s)\n", data.c_str(),
-            disc_ready ? " (ready)" : "", retro_rewind.c_str(), retro_rewind_ready ? " (ready)" : "",
-            KAIHEN_RR_VERSION);
-    std::thread worker(Work, root, data, retro_rewind);
-    while (!g_status.finished.load()) {
-        if (kaihen_return_requested()) {
-            worker.detach();  // it's past the point of no return only when finished
-            settings_overlay::ConsoleReturnToLauncher();
+    if (!disc_ready || !retro_rewind_ready) {
+        RT_LOGF("setup", "first-time setup: disc %s%s, Retro Rewind %s%s (app built for %s)\n", data.c_str(),
+                disc_ready ? " (ready)" : "", retro_rewind.c_str(), retro_rewind_ready ? " (ready)" : "",
+                KAIHEN_RR_VERSION);
+        std::thread worker(Work, root, data, retro_rewind);
+        while (!g_status.finished.load()) {
+            if (kaihen_return_requested()) {
+                worker.detach();  // it's past the point of no return only when finished
+                settings_overlay::ConsoleReturnToLauncher();
+            }
+            aurora_update();
+            if (aurora_begin_frame()) {
+                Draw();
+                aurora_end_frame();
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            }
         }
-        aurora_update();
-        if (aurora_begin_frame()) {
-            Draw();
-            aurora_end_frame();
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(16));
-        }
+        worker.join();
+        RT_LOGF("setup", "done\n");
     }
-    worker.join();
-    RT_LOGF("setup", "done\n");
 }
 
 }  // namespace kaihen_setup

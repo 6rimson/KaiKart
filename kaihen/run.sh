@@ -40,7 +40,7 @@ if [[ "$action" == release ]]; then
     echo "kaihen/card has local changes or extra files; they would go into the apps. Commit or remove them first." >&2
     exit 1
   fi
-  version="${KAIHEN_VERSION:-$(sed -n 's/.*KAIHEN_VERSION:-\([0-9.]*\)}.*/\1/p' "$HERE/build.sh" | head -1)}"
+  version="${KAIHEN_VERSION:-$(sed -n 's/^VERSION="\${KAIHEN_VERSION:-\([0-9.]*\)}"$/\1/p' "$HERE/build.sh")}"
   out="$HERE/dist/release"
   rm -rf "$out"
   mkdir -p "$out"
@@ -95,5 +95,5 @@ case "$action" in sources|translate) HOST=rw WORK_MODE=rw ;; esac
 exec docker run --rm ${TTY[@]+"${TTY[@]}"} \
   -v "$REPO:/host:$HOST" -v "$WORK:/opt/work:$WORK_MODE" \
   -v "${KAIHEN_VOLUME:-wiicompiled-kaihen}:/opt/kaihen" -v "$HERE/dist:/dist" \
-  -e KAIHEN_JOBS -e KAIHEN_PRODUCT -e KAIHEN_COMPILER -e KAIHEN_PGO -e KAIHEN_VERSION -e KAIHEN_RELEASE \
+  -e KAIHEN_JOBS -e KAIHEN_PRODUCT -e KAIHEN_COMPILER -e KAIHEN_PGO -e KAIHEN_VERSION -e KAIHEN_RELEASE -e KAIHEN_UPDATE_REPO \
   "$IMAGE" bash /host/kaihen/build.sh "$@"

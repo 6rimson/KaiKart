@@ -12,6 +12,9 @@
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "wiimote_host.h"
+#if defined(MKW_KAIHEN)
+#include "../../kaihen/platform/kaihen_setup.h"
+#endif
 
 #include <imgui.h>
 #include <SDL3/SDL_events.h>
@@ -1422,6 +1425,13 @@ void DrawStartupScreen() {
         const ImVec2 hintSize = ImGui::CalcTextSize(kHint);
         ImGui::SetCursorPos(ImVec2(std::max(0.0f, (viewport->Size.x - hintSize.x) * 0.5f), nextY));
         ImGui::TextUnformatted(kHint);
+#if defined(MKW_KAIHEN)
+        constexpr const char* kUpdatesHint = "Press B for updates";  // kaihen/platform/kaihen_setup.cpp
+        const ImVec2 updatesSize = ImGui::CalcTextSize(kUpdatesHint);
+        ImGui::SetCursorPos(ImVec2(std::max(0.0f, (viewport->Size.x - updatesSize.x) * 0.5f),
+                                   ImGui::GetCursorPosY() + 2.0f));
+        ImGui::TextUnformatted(kUpdatesHint);
+#endif
     }
     ImGui::End();
     ImGui::PopStyleVar();
@@ -1619,6 +1629,9 @@ void PersistDisplayModeIfChanged() {
 void ApplyInputBlockState() {
 #if defined(HBX_SWITCH2)
     const bool blocked = g_consoleMenuOpen || controller_mapping_wizard::IsActive() || g_rebind.active ||
+#if defined(MKW_KAIHEN)
+                         kaihen_setup::UpdatesOpen() ||
+#endif
 #else
     const bool blocked = controller_mapping_wizard::IsActive() || g_rebind.active ||
 #endif
@@ -2151,8 +2164,12 @@ void Draw() noexcept {
 #if defined(HBX_SWITCH2)
     DrawConsoleMenu();
 #endif
-    ApplyInputBlockState();
     DrawStartupScreen();
+#if defined(MKW_KAIHEN)
+    // B on the startup screen opens the update screen over the game.
+    kaihen_setup::UpdatesFrame(StartupScreenVisible());
+#endif
+    ApplyInputBlockState();
 }
 
 bool StartupScreenVisible() noexcept {

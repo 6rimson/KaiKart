@@ -101,6 +101,39 @@ struct Get::Impl {
     uint64_t length = UINT64_MAX;
     uint64_t remaining = UINT64_MAX;
     uint64_t total = UINT64_MAX;
+    bool chunked = false;
+    uint64_t chunk_left = 0;  // chunked: bytes left in the current chunk
+    bool chunks_done = false;
+
+    // The next bytes of the connection: what came with the headers first.
+    int Next(unsigned char* buffer, size_t size, std::string& error) {
+        if (!pending.empty()) {
+            const size_t n = std::min(size, pending.size());
+            std::memcpy(buffer, pending.data(), n);
+            pending.erase(0, n);
+            return int(n);
+        }
+        return RawRead(buffer, size, error);
+    }
+
+    bool Line(std::string& line, std::string& error) {
+        line.clear();
+        unsigned char c;
+        while (true) {
+            const int n = Next(&c, 1, error);
+            if (n <= 0) {
+                if (n == 0) error = "the download ended early";
+                return false;
+            }
+            if (c == '\n') break;
+            if (c != '\r') line.push_back(char(c));
+            if (line.size() > 1024) {
+                error = "the server's answer was malformed";
+                return false;
+            }
+        }
+        return true;
+    }
 
     Impl() {
         mbedtls_net_init(&net);
@@ -245,7 +278,11 @@ bool Get::Open(const std::string& start_url, uint64_t from, uint64_t to, std::st
             error = "the server answered " + std::to_string(status);
             return false;
         }
-        if (!HeaderValue(headers, "transfer-encoding").empty()) {
+        const std::string encoding = HeaderValue(headers, "transfer-encoding");
+        impl_->chunked = encoding == "chunked";
+        impl_->chunk_left = 0;
+        impl_->chunks_done = false;
+        if (!encoding.empty() && !impl_->chunked) {
             error = "the server sent the data in a form this app can't read";
             return false;
         }
@@ -263,6 +300,27 @@ bool Get::Open(const std::string& start_url, uint64_t from, uint64_t to, std::st
 }
 
 int64_t Get::Read(void* buffer, size_t size, std::string& error) {
+    if (impl_->chunked) {
+        if (impl_->chunks_done) return 0;
+        if (impl_->chunk_left == 0) {
+            std::string line;
+            if (!impl_->Line(line, error)) return -1;
+            if (line.empty() && !impl_->Line(line, error)) return -1;  // the CRLF after a chunk
+            impl_->chunk_left = std::strtoull(line.c_str(), nullptr, 16);
+            if (impl_->chunk_left == 0) {
+                impl_->chunks_done = true;
+                return 0;
+            }
+        }
+        const int n = impl_->Next(static_cast<unsigned char*>(buffer),
+                                  size_t(std::min<uint64_t>(size, impl_->chunk_left)), error);
+        if (n <= 0) {
+            if (n == 0) error = "the download ended early";
+            return -1;
+        }
+        impl_->chunk_left -= uint64_t(n);
+        return n;
+    }
     if (impl_->remaining == 0) {
         return 0;
     }
