@@ -80,6 +80,24 @@ Source: <https://github.com/ravensclawx/TwilightPrincess-HBLauncher>, license at
 the SDL3 audio and controller drivers in `kaihen/patches/sdl3-kaihen.diff` follow the layout of its
 SDL drivers.
 
+### DriftDroid disc extractor - GPL-3.0
+
+Copyright dorPXP.
+The KaiKart launcher's disc image import, `kaihen/shared/wii_disc_extractor.{h,cpp}`, comes from
+DriftDroid's `runtime/src/hle/storage/wii_disc_extractor.cpp` at commit `35a7013`, adapted to
+Mbed TLS and the launcher's progress display.
+Source: <https://github.com/dorPXP/driftdroid>
+
+### KaiKart launcher libraries (kaiHEN builds)
+
+The launcher (`kaihen/launcher/`) also links these, from the Switch 2 devkit's libraries:
+
+- **libnx** - ISC. Copyright the libnx authors. <https://github.com/switchbrew/libnx>
+- **libjpeg-turbo** - IJG License, BSD-3-Clause and zlib, for its icons.
+  <https://github.com/libjpeg-turbo/libjpeg-turbo>
+- **stb_truetype** - MIT or public domain, for its text, as Dear ImGui carries it
+  (`imstb_truetype.h`). Copyright Sean Barrett. <https://github.com/nothings/stb>
+
 ### pugixml - MIT
 
 Copyright (c) 2006-2025 Arseny Kapoulkine.
