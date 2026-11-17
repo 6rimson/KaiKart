@@ -29,6 +29,9 @@
 #ifndef KAIKART_VERSION
 #define KAIKART_VERSION "dev"
 #endif
+#ifndef KAIHEN_UPDATE_REPO
+#define KAIHEN_UPDATE_REPO ""
+#endif
 
 namespace {
 
@@ -39,14 +42,22 @@ constexpr const char* kRetroRewind = "sdmc:/wiicompiled/RetroRewind/RetroRewind6
 struct Game {
     const char* title;
     const char* path;
+    const char* release_name;  // <release_name>-<version>.nro in a release
     bool retro_rewind;
 };
 const Game kGames[] = {
-    {"Retro Rewind", "sdmc:/wiicompiled/apps/RetroRewind.nro", true},
-    {"Original Mario Kart Wii", "sdmc:/wiicompiled/apps/WiiCompiled.nro", false},
+    {"Retro Rewind", "sdmc:/wiicompiled/apps/RetroRewind.nro", "RetroRewind", true},
+    {"Original Mario Kart Wii", "sdmc:/wiicompiled/apps/WiiCompiled.nro", "WiiCompiled", false},
 };
 constexpr int kGameCount = sizeof kGames / sizeof kGames[0];
-constexpr int kRows = kGameCount + 1;  // and "Return to hbmenu"
+constexpr int kUpdatesRow = kGameCount;
+constexpr int kRows = kGameCount + 2;  // and "Check for updates", "Return to hbmenu"
+
+std::string g_self;  // this launcher's .nro (hbmenu passes its path first)
+
+std::string ReleaseBase(const std::string& version) {
+    return std::string("https://github.com/") + KAIHEN_UPDATE_REPO + "/releases/download/v" + version;
+}
 
 // --- the log: wiicompiled/UserData/Logs/kaikart.log -------------------------------------------------
 
@@ -124,7 +135,8 @@ void DrawMenu(int selected, const std::string& message) {
             if (kGames[i].retro_rewind && KAIHEN_RR_VERSION[0]) std::printf("  (%s)", KAIHEN_RR_VERSION);
             std::printf("\n");
         } else {
-            std::printf("  %s Return to hbmenu\n", i == selected ? ">" : " ");
+            if (i == kUpdatesRow) std::printf("\n");
+            std::printf("  %s %s\n", i == selected ? ">" : " ", i == kUpdatesRow ? "Check for updates" : "Return to hbmenu");
         }
     }
     std::printf("\n  %s\n", message.c_str());
@@ -201,13 +213,17 @@ bool RunStep(const char* title, PadState& pad, Work work) {
     }
     pthread_join(worker, nullptr);
     if (job.ok) {
-        // The finished bar for a moment, before the next step or the game.
+        // A step with a bar shows it full for a moment, before the next step or the game.
+        bool bar;
         {
             std::lock_guard<std::mutex> lock(progress.mutex);
-            progress.fraction = 1;
+            bar = progress.fraction >= 0;
+            if (bar) progress.fraction = 1;
         }
-        DrawProgress(title, progress);
-        svcSleepThread(700'000'000);
+        if (bar) {
+            DrawProgress(title, progress);
+            svcSleepThread(700'000'000);
+        }
         return true;
     }
     DrawProgress(title, progress);
@@ -239,6 +255,78 @@ bool Exists(const char* path) {
     return stat(path, &st) == 0;
 }
 
+// --- updates ------------------------------------------------------------------------------------------
+
+void DrawLines(const char* title, const std::string& body, const char* keys) {
+    Header();
+    std::printf("  %s\n\n  %s\n\n\n  %s\n", title, body.c_str(), keys);
+    consoleUpdate(nullptr);
+}
+
+u64 WaitButtons(PadState& pad, u64 wanted) {
+    while (appletMainLoop()) {
+        padUpdate(&pad);
+        const u64 down = padGetButtonsDown(&pad) & wanted;
+        if (down) return down;
+        svcSleepThread(16'000'000);
+    }
+    return 0;
+}
+
+// "Check for updates": a newer release on GitHub replaces this launcher and the games on the card,
+// then the launcher starts again. True when it's restarting.
+bool CheckForUpdates(PadState& pad) {
+    kaikart::Release release;
+    std::string error;
+    bool asked = false;
+    RunStep("Updates", pad, [&](kaikart::Progress& p) {
+        {
+            std::lock_guard<std::mutex> lock(p.mutex);
+            p.step = "Checking for updates...";
+        }
+        asked = kaikart::NewerRelease(KAIHEN_UPDATE_REPO, "KaiKart", KAIKART_VERSION, release, error);
+        return true;
+    });
+    if (!asked) {
+        DrawLines("Updates", "Couldn't check for updates: " + error + ".\n  Check the console's internet connection.",
+                  "B: back");
+        WaitButtons(pad, HidNpadButton_B);
+        return false;
+    }
+    if (release.version.empty()) {
+        DrawLines("Updates", "KaiKart " KAIKART_VERSION " is up to date.", "B: back");
+        WaitButtons(pad, HidNpadButton_B);
+        return false;
+    }
+    DrawLines("Updates", "KaiKart " + release.version + " is available. You have " KAIKART_VERSION ".",
+              "A: download and install   B: back");
+    if (!(WaitButtons(pad, HidNpadButton_A | HidNpadButton_B) & HidNpadButton_A)) return false;
+    Log("[kaikart] updating to %s\n", release.version.c_str());
+    const std::string base = release.download_base, sums = base + "/SHA256SUMS";
+    const std::string title = "Updating to KaiKart " + release.version;
+    // The games on the card first, then the launcher itself (it runs from memory, so its file can go).
+    for (const Game& game : kGames) {
+        if (!Exists(game.path)) continue;
+        const std::string url = base + "/" + game.release_name + "-" + release.version + ".nro";
+        if (!RunStep(title.c_str(), pad,
+                     [&](kaikart::Progress& p) { return kaikart::DownloadChecked(url, sums, game.path, p); })) {
+            return false;
+        }
+    }
+    if (!RunStep(title.c_str(), pad, [&](kaikart::Progress& p) {
+            return kaikart::DownloadChecked(base + "/KaiKart-" + release.version + ".nro", sums, g_self, p);
+        })) {
+        return false;
+    }
+    if (R_FAILED(envSetNextLoad(g_self.c_str(), g_self.c_str()))) {
+        DrawLines("Updates", "Updated to " + release.version + ". Close KaiKart and open it again to use it.", "B: back");
+        WaitButtons(pad, HidNpadButton_B);
+        return false;
+    }
+    Log("[kaikart] updated to %s; starting it\n", release.version.c_str());
+    return true;
+}
+
 // Everything the game needs, then the hand-off. False (with `message`) when it can't start it.
 bool Prepare(const Game& game, PadState& pad, std::string& message) {
     if (GameRanThisSession()) {
@@ -246,9 +334,19 @@ bool Prepare(const Game& game, PadState& pad, std::string& message) {
                   "  Close KaiKart with HOME, then hold R while starting a game to open hbmenu again.";
         return false;
     }
-    if (!Exists(game.path)) {
-        message = "That game isn't on the card yet (wiicompiled/apps).";
-        return false;
+    // The game's build matches this launcher's version (both come from one release); otherwise it's
+    // downloaded from that release.
+    const std::string build = kaikart::NroVersion(game.path);
+    if (build != KAIKART_VERSION) {
+        Log("[kaikart] %s build is '%s', getting %s\n", game.release_name, build.c_str(), KAIKART_VERSION);
+        const std::string base = ReleaseBase(KAIKART_VERSION);
+        const std::string file = std::string(game.release_name) + "-" KAIKART_VERSION ".nro";
+        if (!RunStep((std::string("Getting ") + game.title).c_str(), pad, [&](kaikart::Progress& p) {
+                return kaikart::DownloadChecked(base + "/" + file, base + "/SHA256SUMS", game.path, p);
+            })) {
+            message = build.empty() ? "That game isn't on the card yet." : "That game's build doesn't match KaiKart.";
+            return false;
+        }
     }
     if (!kaikart::DiscReady(kDisc)) {
         Log("[kaikart] importing the disc\n");
@@ -281,7 +379,7 @@ bool Prepare(const Game& game, PadState& pad, std::string& message) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    (void)argc, (void)argv;
+    g_self = argc > 0 && argv[0] ? argv[0] : "sdmc:/switch/KaiKart.nro";
     if (R_SUCCEEDED(romfsInit())) {
         CopyMissing("romfs:/wiicompiled", kRoot);
         romfsExit();
@@ -305,7 +403,7 @@ int main(int argc, char** argv) {
 
     int selected = 0;
     std::string message = envHasNextLoad() ? "" : "kaiHEN's loader can't start another app from here.";
-    bool starting = false;
+    bool starting = false, restarting = false;
     DrawMenu(selected, message);
     while (!starting && appletMainLoop()) {
         padUpdate(&pad);
@@ -318,15 +416,22 @@ int main(int argc, char** argv) {
         if (down & HidNpadButton_AnyDown) selected = (selected + 1) % kRows;
         if (down & HidNpadButton_Plus) break;
         if (down & HidNpadButton_A) {
-            if (selected == kGameCount) break;
+            if (selected == kRows - 1) break;
             message.clear();
-            starting = Prepare(kGames[selected], pad, message);
+            if (selected == kUpdatesRow) {
+                if (CheckForUpdates(pad)) {
+                    restarting = true;
+                    break;
+                }
+            } else {
+                starting = Prepare(kGames[selected], pad, message);
+            }
         }
         if (!starting) DrawMenu(selected, message);
     }
-    if (starting) {
+    if (starting || restarting) {
         Header();
-        std::printf("  Starting %s...\n", kGames[selected].title);
+        std::printf("  %s...\n", restarting ? "Starting the new KaiKart" : (std::string("Starting ") + kGames[selected].title).c_str());
         consoleUpdate(nullptr);
     }
     consoleExit(nullptr);

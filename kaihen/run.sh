@@ -8,7 +8,8 @@
 #   kaihen/run.sh launcher     build the KaiKart launcher (kaihen/dist/KaiKart.nro), after a build
 #   kaihen/run.sh sd /Volumes/CARD [--nand DIR] [--rr-save FILE]
 #                              put the .nro and the game's files on a microSD card (kaihen/sd.py)
-#   kaihen/run.sh release      build both apps for a release: kaihen/dist/release/ with SHA256SUMS
+#   kaihen/run.sh release      build the launcher and both games for a release: kaihen/dist/release/
+#                              (KaiKart-, RetroRewind-, WiiCompiled-<version>.nro) with SHA256SUMS
 # KAIHEN_PRODUCT: RetroRewind (default) or WiiCompiled (plain Mario Kart Wii).
 # KAIHEN_JOBS: parallel jobs (6 fits 8 GB of Docker memory). KAIHEN_PGO=0: no profile.
 # KAIHEN_COMPILER=gcc: the devkit's GCC instead of Clang, without PGO.
@@ -49,6 +50,11 @@ if [[ "$action" == release ]]; then
     echo "== $product"
     KAIHEN_PRODUCT=$product KAIHEN_RELEASE=1 KAIHEN_VERSION="$version" "$0" build
     cp "$HERE/dist/$product.nro" "$out/$product-$version.nro"
+    if [[ "$product" == RetroRewind ]]; then
+      echo "== KaiKart"
+      KAIHEN_RELEASE=1 KAIHEN_VERSION="$version" "$0" launcher
+      cp "$HERE/dist/KaiKart.nro" "$out/KaiKart-$version.nro"
+    fi
   done
   (cd "$out" && shasum -a 256 ./*.nro | sed 's# \./# #' > SHA256SUMS && cat SHA256SUMS)
   exit 0

@@ -37,4 +37,21 @@ bool RetroRewindReady(const fs::path& folder, const std::string& code_sha256);
 bool InstallRetroRewind(const fs::path& folder, const std::string& version, const std::string& code_sha256,
                         Progress& progress);
 
+// KaiKart's own releases (GitHub, owner/name): each holds KaiKart-<version>.nro,
+// <game>-<version>.nro for each game, and SHA256SUMS.
+struct Release {
+    std::string version;
+    std::string download_base;  // https://github.com/<repo>/releases/download/<tag>
+};
+bool VersionNewer(const std::string& a, const std::string& b);
+// The display version in an .nro's NACP (what hbmenu shows), or empty.
+std::string NroVersion(const fs::path& nro);
+// The newest release of `repo` with a `name`-<version>.nro newer than `current`; found.version stays
+// empty when there's none. False (with `error`) when GitHub can't be asked.
+bool NewerRelease(const std::string& repo, const std::string& name, const std::string& current, Release& found,
+                  std::string& error);
+// Downloads `url` to `path` (through path.partial), checked against the SHA-256 that `sums_url`
+// (a SHA256SUMS file) lists for its file name; the old file is replaced only when it checks out.
+bool DownloadChecked(const std::string& url, const std::string& sums_url, const fs::path& path, Progress& progress);
+
 }  // namespace kaikart

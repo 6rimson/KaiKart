@@ -529,7 +529,291 @@ bool DownloadRetroRewind(const fs::path& folder) {
     return true;
 }
 
+// --- Retro Rewind's small updates ------------------------------------------------------------------
+// Retro Rewind publishes a zip per release (RetroRewindVersion.txt: "version url path description")
+// and the files each release removes (RetroRewindDelete.txt: "version path"), which is how Wheel
+// Wizard updates. From the card's version to the app's: the removals, then each zip unpacked over
+// the folder. Anything that doesn't line up leaves the full download to do the job.
+
+constexpr const char* kVersionList = "https://update.rwfc.net/RetroRewind/RetroRewindVersion.txt";
+constexpr const char* kDeleteList = "https://update.rwfc.net/RetroRewind/RetroRewindDelete.txt";
+
+// "6.13.5" -> {6, 13, 5}; compares like versions.
+std::vector<int> VersionParts(const std::string& text) {
+    std::vector<int> parts;
+    size_t at = 0;
+    while (at < text.size() && std::isdigit(static_cast<unsigned char>(text[at]))) {
+        parts.push_back(std::atoi(text.c_str() + at));
+        while (at < text.size() && std::isdigit(static_cast<unsigned char>(text[at]))) ++at;
+        if (at < text.size() && text[at] == '.') ++at; else break;
+    }
+    return parts;
+}
+
+std::string CardRetroRewindVersion(const fs::path& folder) {
+    FILE* file = std::fopen((folder / "version.txt").c_str(), "rb");
+    if (!file) return {};
+    char text[64] = {};
+    const size_t n = std::fread(text, 1, sizeof text - 1, file);
+    std::fclose(file);
+    std::string version(text, n);
+    while (!version.empty() && std::isspace(static_cast<unsigned char>(version.back()))) version.pop_back();
+    while (!version.empty() && std::isspace(static_cast<unsigned char>(version.front()))) version.erase(0, 1);
+    return version;
+}
+
+bool FetchString(const std::string& url, std::string& text, std::string& error) {
+    std::vector<uint8_t> bytes;
+    if (!Fetch(url, 0, UINT64_MAX, bytes, nullptr, error)) return false;
+    text.assign(bytes.begin(), bytes.end());
+    return true;
+}
+
+std::vector<std::vector<std::string>> Lines(const std::string& text) {
+    std::vector<std::vector<std::string>> lines;
+    size_t start = 0;
+    while (start < text.size()) {
+        size_t end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        std::vector<std::string> words;
+        size_t at = start;
+        while (at < end) {
+            while (at < end && std::isspace(static_cast<unsigned char>(text[at]))) ++at;
+            const size_t word = at;
+            while (at < end && !std::isspace(static_cast<unsigned char>(text[at]))) ++at;
+            if (at > word) words.push_back(text.substr(word, at - word));
+        }
+        if (!words.empty()) lines.push_back(std::move(words));
+        start = end + 1;
+    }
+    return lines;
+}
+
+// True when the folder is now the app's release (Code.pul checked); false leaves it to the full
+// download, which replaces the folder anyway.
+bool UpdateRetroRewind(const fs::path& folder) {
+    const std::string from = CardRetroRewindVersion(folder);
+    const auto from_parts = VersionParts(from), to_parts = VersionParts(g_rr_version);
+    if (from_parts.empty() || from_parts >= to_parts) return false;
+    Log("Retro Rewind update from %s to %s\n", from.c_str(), g_rr_version.c_str());
+    SetStep("Connecting to Retro Rewind's server");
+    std::string versions, deletions, error;
+    if (!FetchString(kVersionList, versions, error) || !FetchString(kDeleteList, deletions, error)) {
+        Log("Retro Rewind update lists: %s\n", error.c_str());
+        return false;
+    }
+    std::vector<std::pair<std::vector<int>, std::string>> zips;  // version, url
+    for (const auto& line : Lines(versions)) {
+        if (line.size() < 2) continue;
+        const auto parts = VersionParts(line[0]);
+        if (parts > from_parts && parts <= to_parts) zips.push_back({parts, line[1]});
+    }
+    std::sort(zips.begin(), zips.end());
+    if (zips.empty() || zips.back().first != to_parts) {
+        Log("Retro Rewind update: no zip chain reaches %s\n", g_rr_version.c_str());
+        return false;
+    }
+    for (auto& zip : zips) {
+        // The list still names an old address for some; Wheel Wizard swaps it the same way.
+        const std::string legacy = "http://update.rwfc.net:8000/";
+        if (zip.second.compare(0, legacy.size(), legacy) == 0) {
+            zip.second = "https://update.rwfc.net/" + zip.second.substr(legacy.size());
+        }
+        if (zip.second.compare(0, 8, "https://") != 0) return false;
+    }
+    // The removals, inside the folder that holds RetroRewind6 only.
+    const fs::path root = folder.parent_path();
+    std::error_code fs_error;
+    for (const auto& line : Lines(deletions)) {
+        if (line.size() < 2) continue;
+        const auto parts = VersionParts(line[0]);
+        if (!(parts > from_parts && parts <= to_parts)) continue;
+        std::string relative = line[1];
+        while (!relative.empty() && (relative[0] == '/' || relative[0] == '\\')) relative.erase(0, 1);
+        if (relative.empty() || relative.find("..") != std::string::npos) continue;
+        fs::remove_all(root / fs::path(relative), fs_error);
+    }
+    SetStep("Downloading the updates");
+    for (size_t z = 0; z < zips.size(); ++z) {
+        const std::string& url = zips[z].second;
+        std::vector<ZipEntry> entries;
+        uint64_t run_end = 0;
+        int failures = 0;
+        bool done = false;
+        while (!done && failures <= 3) {
+            entries.clear();
+            if (!ReadZipDirectory(url, entries, run_end, error)) {
+                ++failures;
+                continue;
+            }
+            RunReader reader;
+            if (!reader.get.Open(url, entries.front().offset, run_end - 1, error)) {
+                ++failures;
+                continue;
+            }
+            size_t next = 0;
+            while (next < entries.size() && UnpackEntry(reader, entries[next], folder, error)) ++next;
+            done = next == entries.size();
+            if (!done) ++failures;
+        }
+        if (!done) {
+            Log("Retro Rewind update %s failed: %s\n", url.c_str(), error.c_str());
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(g_progress->mutex);
+        g_progress->fraction = float(z + 1) / float(zips.size());
+    }
+    SetStep("Checking the update");
+    const bool ok = RetroRewindReadyAt(folder);
+    Log("Retro Rewind update to %s %s\n", g_rr_version.c_str(), ok ? "done" : "didn't match; full download");
+    return ok;
+}
+
 }  // namespace
+
+// --- KaiKart's own releases --------------------------------------------------------------------------
+
+bool VersionNewer(const std::string& a, const std::string& b) { return VersionParts(a) > VersionParts(b); }
+
+std::string NroVersion(const fs::path& nro) {
+    // NRO: "NRO0" at 0x10 and the NRO's size at 0x18; its assets follow ("ASET", then the icon's and
+    // the NACP's offset and size); the NACP's display version is at 0x3060.
+    FILE* file = std::fopen(nro.c_str(), "rb");
+    if (!file) return {};
+    std::string version;
+    uint8_t header[0x20];
+    if (std::fread(header, 1, sizeof header, file) == sizeof header && std::memcmp(header + 0x10, "NRO0", 4) == 0) {
+        const uint32_t size = Le32(header + 0x18);
+        uint8_t assets[0x38];
+        if (std::fseek(file, long(size), SEEK_SET) == 0 && std::fread(assets, 1, sizeof assets, file) == sizeof assets &&
+            std::memcmp(assets, "ASET", 4) == 0) {
+            uint64_t nacp = 0;
+            std::memcpy(&nacp, assets + 0x18, 8);
+            char text[16] = {};
+            if (std::fseek(file, long(size + nacp + 0x3060), SEEK_SET) == 0 && std::fread(text, 1, 15, file) > 0) {
+                version.assign(text);
+            }
+        }
+    }
+    std::fclose(file);
+    return version;
+}
+
+bool NewerRelease(const std::string& repo, const std::string& name, const std::string& current, Release& found,
+                  std::string& error) {
+    std::string releases;
+    if (repo.empty() ||
+        !FetchString("https://api.github.com/repos/" + repo + "/releases?per_page=20", releases, error)) {
+        if (repo.empty()) error = "no update address in this build";
+        return false;
+    }
+    // Each release's assets: "browser_download_url":".../releases/download/<tag>/<name>-<version>.nro"
+    const std::string key = "\"browser_download_url\":", prefix = "/" + name + "-";
+    found = {};
+    for (size_t at = releases.find(key); at != std::string::npos; at = releases.find(key, at + 1)) {
+        const size_t quote = releases.find('"', at + key.size());
+        if (quote == std::string::npos) break;
+        const size_t begin = quote + 1, end = releases.find('"', begin);
+        if (end == std::string::npos) break;
+        const std::string url = releases.substr(begin, end - begin);
+        const size_t file = url.rfind(prefix);
+        if (file == std::string::npos || url.size() < 4 || url.compare(url.size() - 4, 4, ".nro") != 0) continue;
+        const std::string version = url.substr(file + prefix.size(), url.size() - 4 - file - prefix.size());
+        if (VersionNewer(version, current) && (found.version.empty() || VersionNewer(version, found.version))) {
+            found.version = version;
+            found.download_base = url.substr(0, file);
+        }
+    }
+    return true;
+}
+
+bool DownloadChecked(const std::string& url, const std::string& sums_url, const fs::path& path, Progress& progress) {
+    g_progress = &progress;
+    const std::string file_name = url.substr(url.rfind('/') + 1);
+    SetStep("Downloading " + file_name);
+    std::string sums, expected, error;
+    if (!FetchString(sums_url, sums, error)) {
+        Fail("Couldn't get the release's checksums: " + error + ".", "Check the console's internet connection.");
+        return false;
+    }
+    for (const auto& line : Lines(sums)) {
+        if (line.size() >= 2 && (line[1] == file_name || line[1] == "*" + file_name) && line[0].size() == 64) {
+            expected = line[0];
+        }
+    }
+    if (expected.empty()) {
+        Fail("The release's checksums don't list " + file_name + ".", "Try again later.");
+        return false;
+    }
+    for (auto& c : expected) c = char(std::toupper(static_cast<unsigned char>(c)));
+    const fs::path partial = path.string() + ".partial";
+    std::error_code fs_error;
+    fs::create_directories(path.parent_path(), fs_error);
+    FILE* out = std::fopen(partial.c_str(), "wb");
+    kaihen_https::Get get;
+    if (!out || !get.Open(url, 0, UINT64_MAX, error)) {
+        if (out) std::fclose(out);
+        std::remove(partial.c_str());
+        Fail("Couldn't download " + file_name + ": " + (out ? error : "can't write to the card") + ".",
+             "Check the console's internet connection.");
+        return false;
+    }
+    static std::vector<char> file_buffer(1 << 18);
+    std::setvbuf(out, file_buffer.data(), _IOFBF, file_buffer.size());
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+    std::vector<uint8_t> buffer(1 << 16);
+    const uint64_t length = get.Length();
+    uint64_t done = 0;
+    int64_t n;
+    bool ok = true;
+    while ((n = get.Read(buffer.data(), buffer.size(), error)) > 0) {
+        mbedtls_sha256_update(&sha, buffer.data(), size_t(n));
+        if (std::fwrite(buffer.data(), 1, size_t(n), out) != size_t(n)) {
+            ok = false;
+            error = "writing to the card failed (is it full?)";
+            break;
+        }
+        done += uint64_t(n);
+        if (length != UINT64_MAX && length != 0) {
+            std::lock_guard<std::mutex> lock(progress.mutex);
+            progress.fraction = float(double(done) / double(length));
+        }
+    }
+    if (ok && n < 0) ok = false;
+    if (std::fclose(out) != 0 && ok) {
+        ok = false;
+        error = "writing to the card failed (is it full?)";
+    }
+    unsigned char digest[32];
+    mbedtls_sha256_finish(&sha, digest);
+    mbedtls_sha256_free(&sha);
+    char hex[65];
+    for (int i = 0; i < 32; ++i) std::snprintf(hex + i * 2, 3, "%02X", digest[i]);
+    if (ok && expected != hex) {
+        ok = false;
+        error = "it doesn't match its checksum";
+    }
+    if (!ok) {
+        std::remove(partial.c_str());
+        Fail(file_name + " didn't download: " + error + ".", "Try again later.");
+        return false;
+    }
+    // The new file takes the old one's place; the old one stays until the new one is in.
+    const std::string old = path.string() + ".old";
+    std::remove(old.c_str());
+    const bool had_old = std::rename(path.c_str(), old.c_str()) == 0;
+    if (std::rename(partial.c_str(), path.c_str()) != 0) {
+        if (had_old) std::rename(old.c_str(), path.c_str());
+        std::remove(partial.c_str());
+        Fail("Couldn't put " + file_name + " in place on the card.", "Try again.");
+        return false;
+    }
+    std::remove(old.c_str());
+    Log("downloaded %s to %s\n", file_name.c_str(), path.c_str());
+    return true;
+}
 
 void SetLog(void (*log)(const char* line)) { g_log = log; }
 
@@ -555,6 +839,11 @@ bool InstallRetroRewind(const fs::path& folder, const std::string& version, cons
     g_progress = &progress;
     g_rr_version = version;
     g_rr_sha256 = code_sha256;
+    if (UpdateRetroRewind(folder)) return true;
+    {
+        std::lock_guard<std::mutex> lock(progress.mutex);
+        progress.fraction = -1;
+    }
     return DownloadRetroRewind(folder);
 }
 
