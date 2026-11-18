@@ -48,6 +48,20 @@ disc image to free space.
 The first launch then spends about 15-20 seconds on the title screen setting up its saved shaders.
 Wait there until the shader message is gone before racing.
 
+### Without internet on the console
+
+The disc setup works offline. What KaiKart would download, you can put on the card from a computer
+instead:
+
+- **The game builds:** download `RetroRewind-<version>.nro` and `WiiCompiled-<version>.nro` from
+  the release, rename them `RetroRewind.nro` and `WiiCompiled.nro`, and put them in
+  `wiicompiled/apps/`.
+- **Retro Rewind:** copy a `RetroRewind6` folder of the version the release notes name (6.13.5
+  for v0.4.0) to `wiicompiled/RetroRewind/RetroRewind6`. Plain Mario Kart Wii doesn't need it.
+
+KaiKart checks both and skips the downloads. "Check for updates" and online races still need
+internet.
+
 ### Coming from v0.3
 
 KaiKart uses the `wiicompiled` folder you already have, with your saves and settings. Put
