@@ -493,6 +493,10 @@ int main(int argc, char** argv) {
     if (romfs) CopyMissing("romfs:/wiicompiled", kRoot);
     mkdir("sdmc:/wiicompiled/UserData", 0777);
     mkdir("sdmc:/wiicompiled/UserData/Logs", 0777);
+    // The previous run's log stays as kaikart.prev.log (only the last one), so a setup or update
+    // problem survives the next start. The card's file system won't rename over a file.
+    std::remove("sdmc:/wiicompiled/UserData/Logs/kaikart.prev.log");
+    std::rename("sdmc:/wiicompiled/UserData/Logs/kaikart.log", "sdmc:/wiicompiled/UserData/Logs/kaikart.prev.log");
     g_log = std::fopen("sdmc:/wiicompiled/UserData/Logs/kaikart.log", "w");
     Log("[kaikart] %s started\n", KAIKART_VERSION);
     kaikart::SetLog(LogLine);

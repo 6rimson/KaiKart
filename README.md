@@ -171,7 +171,8 @@ Below the clocks, the menu shows whether the console is on a charger.
   you restart the game.
 
 If something goes wrong, `wiicompiled/UserData/Logs/` on the card has the logs: `kaikart.log` from
-the launcher, and `kaihen.log` from the last game launch.
+the launcher, and `kaihen.log` from the last game launch. The run before each is kept as
+`kaikart.prev.log` and `kaihen.prev.log`, so a problem isn't lost if you start again.
 
 ## Building from source
 

@@ -20,6 +20,15 @@
 #include <pthread.h>
 #include <switch.h>
 
+/* The game's name and version (kaihen/docker/build.sh writes them), for the first line of its log. */
+#if __has_include("kaihen_build_info.h")
+#include "kaihen_build_info.h"
+#endif
+#ifndef KAIHEN_PRODUCT_NAME
+#define KAIHEN_PRODUCT_NAME "game"
+#define KAIHEN_APP_VERSION "unknown"
+#endif
+
 #define VK_USE_PLATFORM_VI_NN 1
 #include <vulkan/vulkan.h>
 
@@ -126,6 +135,10 @@ static void log_thread(void *arg) {
 }
 
 static void log_start(void) {
+    /* The previous run's log stays as kaihen.prev.log (only the last one), so a problem survives
+     * the next launch. The card's file system won't rename over a file, so the old one goes first. */
+    remove(KAIHEN_ROOT "/UserData/Logs/kaihen.prev.log");
+    rename(KAIHEN_ROOT "/UserData/Logs/kaihen.log", KAIHEN_ROOT "/UserData/Logs/kaihen.prev.log");
     g_log_fd = open(KAIHEN_ROOT "/UserData/Logs/kaihen.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (g_log_fd < 0 || AddDevice(&g_ring_device) < 0)
         return;
@@ -629,8 +642,8 @@ void userAppInit(void) {
     hidSetNpadJoyHoldType(HidNpadJoyHoldType_Horizontal);
     if (R_SUCCEEDED(threadCreate(&g_watchdog, watchdog, NULL, NULL, 0x10000, 0x2C, -2)))
         threadStart(&g_watchdog);
-    fprintf(stderr, "[kaihen] started, nxlink %s; game thread on core %d of mask %lx; hold + and - to quit\n",
-            g_nxlink >= 0 ? "on" : "off", g_game_core, (unsigned long)g_cores);
+    fprintf(stderr, "[kaihen] %s %s started, nxlink %s; game thread on core %d of mask %lx; hold + and - to quit\n",
+            KAIHEN_PRODUCT_NAME, KAIHEN_APP_VERSION, g_nxlink >= 0 ? "on" : "off", g_game_core, (unsigned long)g_cores);
     profiler_start(g_game_core == 1 ? 0 : 1); /* a core no worker is pinned to */
 }
 

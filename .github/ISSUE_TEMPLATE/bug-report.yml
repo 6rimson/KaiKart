@@ -7,7 +7,8 @@ body:
     attributes:
       value: |
         **Your logs** are on the microSD card in `wiicompiled/UserData/Logs/`: `kaikart.log` (the
-        launcher) and `kaihen.log` (the last game launch). Please attach both.
+        launcher) and `kaihen.log` (the last game launch), plus `kaikart.prev.log` and
+        `kaihen.prev.log` (the run before each). Please attach all of them.
   - type: checkboxes
     id: preflight
     attributes:
@@ -80,4 +81,4 @@ body:
     id: logs
     attributes:
       label: Logs and screenshots
-      description: Drag `kaikart.log`, `kaihen.log` and any screenshots or clips here.
+      description: Drag the four log files and any screenshots or clips here.

@@ -108,13 +108,16 @@ sync_tree() {
 }
 
 # What the app knows about itself, in kaihen/platform/kaihen_build_info.h (written only when it
-# changes): its version, the repository its updates come from (KAIHEN_UPDATE_REPO), and the Retro
+# changes): its version and name, the repository its updates come from (KAIHEN_UPDATE_REPO), and the Retro
 # Rewind release it is built for (version and Code.pul's SHA-256), which it downloads from Retro
 # Rewind's server when the card doesn't have it (kaihen_setup.cpp).
 VERSION="${KAIHEN_VERSION:-0.4.0}"
 build_info() {
   local info="$SRC/kaihen/platform/kaihen_build_info.h" rr=/host/PulsarPacks/completed/RetroRewind/RetroRewind6 text
+  local name="Mario Kart Wii"
+  [[ "$PRODUCT" == RetroRewind ]] && name="Retro Rewind"
   text="#define KAIHEN_APP_VERSION \"$VERSION\"
+#define KAIHEN_PRODUCT_NAME \"$name\"
 #define KAIHEN_UPDATE_REPO \"${KAIHEN_UPDATE_REPO:-6rimson/KaiKart}\""
   if [[ "$PRODUCT" == RetroRewind ]]; then
     [[ -f "$rr/Binaries/Code.pul" && -f "$rr/version.txt" ]] || {
