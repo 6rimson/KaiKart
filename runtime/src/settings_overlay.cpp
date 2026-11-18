@@ -497,8 +497,12 @@ void SaveControllerBinding(uint32_t port, uint16_t target) {
         if (alternate[i].padButton == target) alternateValue = alternate[i].nativeButton;
     std::string config = NativeBindingConfig(primaryValue);
     if (alternateValue != PAD_NATIVE_BUTTON_INVALID) config += ',' + NativeBindingConfig(alternateValue);
-    for (size_t i = 0; i < kControllerButtons.size(); ++i)
-        if (kControllerButtons[i].padButton == target) RuntimeConfigFile::SetControllerButton(i, config);
+    for (size_t i = 0; i < kControllerButtons.size(); ++i) {
+        if (kControllerButtons[i].padButton != target) continue;
+        RuntimeConfigFile::SetControllerButton(i, config);
+        RT_LOGF("settings", "player %u %s: %s\n", static_cast<unsigned>(port) + 1, kControllerButtons[i].label,
+                config.c_str());
+    }
 }
 
 void CompleteRebind(uint32_t value) {
@@ -1966,23 +1970,35 @@ constexpr std::array<uint32_t, 4> kConsoleMemorySteps{0, 2750, 3200, 3750};
 constexpr std::array<uint32_t, 5> kConsoleGpuSteps{0, 778, 1007, 1262, 1389};
 constexpr int kConsoleOptionRows = 6;
 
+// The step after `chosen` towards `change`. Left and right (wrap false) stop at the ends, so a stray
+// push can't jump from the highest setting to the lowest; A (wrap true) goes round.
 template <size_t N>
-int ConsoleStepIndex(const std::array<uint32_t, N>& steps, uint32_t chosen, int change) {
+int ConsoleStepIndex(const std::array<uint32_t, N>& steps, uint32_t chosen, int change, bool wrap) {
     int index = 0;
     for (int i = 0; i < static_cast<int>(N); ++i) {
         if (steps[static_cast<size_t>(i)] == chosen) index = i;
     }
-    return (index + change + static_cast<int>(N)) % static_cast<int>(N);
+    return wrap ? (index + change + static_cast<int>(N)) % static_cast<int>(N)
+                : std::clamp(index + change, 0, static_cast<int>(N) - 1);
 }
 
+// Memory (clock 0) or the GPU (1): the next step the console offers, skipping any above its maximum.
 template <size_t N>
-void ConsoleStepClock(int clock, const std::array<uint32_t, N>& steps, int change) {
+void ConsoleStepClock(int clock, const std::array<uint32_t, N>& steps, int change, bool wrap) {
     const uint32_t max = kaihen_clock_max_mhz(clock);
-    uint32_t chosen = kaihen_clock_chosen_mhz(clock);
+    const uint32_t chosen = kaihen_clock_chosen_mhz(clock);
+    int index = ConsoleStepIndex(steps, chosen, 0, true);
     for (size_t tries = 0; tries < N; ++tries) {
-        chosen = steps[static_cast<size_t>(ConsoleStepIndex(steps, chosen, change))];
-        if (chosen == 0 || max == 0 || chosen <= max + 1) {
-            kaihen_clock_choose_mhz(clock, chosen);
+        const int next = wrap ? (index + change + static_cast<int>(N)) % static_cast<int>(N) : index + change;
+        if (next < 0 || next >= static_cast<int>(N)) return;  // at the end: stays
+        index = next;
+        const uint32_t mhz = steps[static_cast<size_t>(index)];
+        if (mhz == 0 || max == 0 || mhz <= max + 1) {
+            if (mhz != chosen) {
+                kaihen_clock_choose_mhz(clock, mhz);
+                RT_LOGF("settings", "%s clock %u MHz (0 is the system's)\n", clock == 0 ? "memory" : "GPU",
+                        static_cast<unsigned>(mhz));
+            }
             return;
         }
     }
@@ -2070,17 +2086,32 @@ void ConsoleMenuInput(int rows) {
                 }
             }
             if (g_consoleMenuRow == 0 && change != 0) {
+                // Stops at 1x and at the highest step: no wrapping round.
                 const int count = static_cast<int>(kConsoleScales.size());
-                SetResolutionScale(kConsoleScales[(ConsoleScaleIndex() + count + change) % count]);
+                const int index = std::clamp(ConsoleScaleIndex() + change, 0, count - 1);
+                if (kConsoleScales[static_cast<size_t>(index)] != g_resolutionScale) {
+                    RT_LOGF("settings", "resolution %.1fx -> %.1fx\n", static_cast<double>(g_resolutionScale),
+                            static_cast<double>(kConsoleScales[static_cast<size_t>(index)]));
+                    SetResolutionScale(kConsoleScales[static_cast<size_t>(index)]);
+                }
             } else if (g_consoleMenuRow == 1 && (change != 0 || confirm)) {
-                g_showFps = !g_showFps;
-                RuntimeConfigFile::SetShowFps(g_showFps);
+                // Left is off, right is on, A switches.
+                const bool show = change < 0 ? false : change > 0 ? true : !g_showFps;
+                if (show != g_showFps) {
+                    g_showFps = show;
+                    RuntimeConfigFile::SetShowFps(g_showFps);
+                    RT_LOGF("settings", "show FPS %s\n", g_showFps ? "on" : "off");
+                }
             } else if (g_consoleMenuRow == 2 && change != 0) {
+                const int before = g_audioVolumePercent;
                 ConsoleChangeVolume(change * 5);
+                if (g_audioVolumePercent != before) RT_LOGF("settings", "volume %d%%\n", g_audioVolumePercent);
             } else if (g_consoleMenuRow == 3 && (change != 0 || confirm)) {
 #if defined(MKW_KAIHEN)
-                kaihen_cpu_clock_choose_mhz(kConsoleCpuSteps[static_cast<size_t>(
-                    ConsoleStepIndex(kConsoleCpuSteps, kaihen_cpu_clock_chosen_mhz(), change != 0 ? change : 1))]);
+                // The CPU's own choice is logged by kaihen_cpu_clock_choose_mhz.
+                const uint32_t mhz = kConsoleCpuSteps[static_cast<size_t>(ConsoleStepIndex(
+                    kConsoleCpuSteps, kaihen_cpu_clock_chosen_mhz(), change != 0 ? change : 1, change == 0))];
+                if (mhz != kaihen_cpu_clock_chosen_mhz()) kaihen_cpu_clock_choose_mhz(mhz);
 #else
                 ConsoleSetCpuBoost(g_consoleBoostMode == 0 ? 1 : 0, true);
 #endif
@@ -2089,9 +2120,9 @@ void ConsoleMenuInput(int rows) {
             } else if ((g_consoleMenuRow == 4 || g_consoleMenuRow == 5) && (change != 0 || confirm)) {
                 const int step = change != 0 ? change : 1;
                 if (g_consoleMenuRow == 4) {
-                    ConsoleStepClock(0, kConsoleMemorySteps, step);
+                    ConsoleStepClock(0, kConsoleMemorySteps, step, change == 0);
                 } else {
-                    ConsoleStepClock(1, kConsoleGpuSteps, step);
+                    ConsoleStepClock(1, kConsoleGpuSteps, step, change == 0);
                 }
 #else
             } else if (g_consoleMenuRow == 4 && (change != 0 || confirm)) {
@@ -2112,6 +2143,7 @@ void ConsoleMenuInput(int rows) {
             } else if (g_consoleMenuRow == rows - 2 && confirm) {
                 PADRestoreDefaultMapping(static_cast<u32>(g_consoleMenuPlayer));
                 PADSerializeMappings();
+                RT_LOGF("settings", "player %d buttons reset to default\n", g_consoleMenuPlayer + 1);
             } else if (g_consoleMenuRow == rows - 1 && confirm) {
                 if (g_consoleExitArmed && !g_consoleLinkLost) {
                     g_consoleReturnRequested = true;
