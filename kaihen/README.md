@@ -16,7 +16,7 @@ disc images. You need your own Mario Kart Wii PAL disc (`RMCP01`). Retro Rewind 
 from its own server, which is its official update source.
 
 The older version, for HBLauncher and SmileBASIC, is on the
-[`switch2-hblauncher`](https://github.com/6rimson/WiiCompiled-Switch2/tree/switch2-hblauncher)
+[`switch2-hblauncher`](https://github.com/6rimson/KaiKart/tree/switch2-hblauncher)
 branch.
 
 ## Play
@@ -34,7 +34,7 @@ branch.
 **Steps:**
 
 1. Download `KaiKart-<version>.nro` from the
-   [latest release](https://github.com/6rimson/WiiCompiled-Switch2/releases/latest) and put it in
+   [latest release](https://github.com/6rimson/KaiKart/releases/latest) and put it in
    the microSD card's `switch` folder.
 2. Make a folder named `wiicompiled` at the root of the card, and put your disc image in it.
 3. Put the card in the console, start kaiHEN, open hbmenu, and choose **KaiKart**.
@@ -133,9 +133,9 @@ Below the clocks, the menu shows whether the console is on a charger.
 ## Known issues
 
 - **One game per kaiHEN session.** Starting a second game in the same session crashes, so each
-  game quits to the HOME Menu instead of returning to hbmenu. To play again, close the app from
-  the HOME Menu, then hold R while starting a game to open hbmenu. If a second game is started
-  anyway, it says so and quits instead of crashing.
+  game quits to the HOME Menu, which closes the app, instead of returning to hbmenu. To play
+  again, hold R while starting a game to open hbmenu. If a second game is started anyway, it says
+  so and quits instead of crashing.
 - **Raised memory and GPU clocks need a charger.** On battery, the console halves the CPU's real
   speed when memory or the GPU run above their handheld rates. So KaiKart runs them as you chose
   only while plugged in, and at the handheld rates on battery. The CPU keeps its rate either way.
@@ -172,8 +172,8 @@ downloading a release. Expect an hour or two for the first build; most of it run
 
 ```sh
 mkdir -p ~/Switch2 && cd ~/Switch2
-git clone --recursive --branch switch2-kaihen https://github.com/6rimson/WiiCompiled-Switch2.git
-cd WiiCompiled-Switch2
+git clone --recursive --branch switch2-kaihen https://github.com/6rimson/KaiKart.git
+cd KaiKart
 ```
 
 `--recursive` also fetches aurora, the graphics library WiiCompiled includes. Run every command

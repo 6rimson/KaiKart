@@ -12,7 +12,7 @@ updates and known issues. You need your own Mario Kart Wii PAL disc; no game fil
 repository or its releases.
 
 The older version for [HBLauncher](https://github.com/ravensclawx/HBLauncher) is on the
-[`switch2-hblauncher`](https://github.com/6rimson/WiiCompiled-Switch2/tree/switch2-hblauncher)
+[`switch2-hblauncher`](https://github.com/6rimson/KaiKart/tree/switch2-hblauncher)
 branch.
 
 The original WiiCompiled README follows.

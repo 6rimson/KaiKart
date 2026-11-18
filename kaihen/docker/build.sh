@@ -115,7 +115,7 @@ VERSION="${KAIHEN_VERSION:-0.4.0}"
 build_info() {
   local info="$SRC/kaihen/platform/kaihen_build_info.h" rr=/host/PulsarPacks/completed/RetroRewind/RetroRewind6 text
   text="#define KAIHEN_APP_VERSION \"$VERSION\"
-#define KAIHEN_UPDATE_REPO \"${KAIHEN_UPDATE_REPO:-6rimson/WiiCompiled-Switch2}\""
+#define KAIHEN_UPDATE_REPO \"${KAIHEN_UPDATE_REPO:-6rimson/KaiKart}\""
   if [[ "$PRODUCT" == RetroRewind ]]; then
     [[ -f "$rr/Binaries/Code.pul" && -f "$rr/version.txt" ]] || {
       echo "Missing $rr: see kaihen/README.md, step 2" >&2
