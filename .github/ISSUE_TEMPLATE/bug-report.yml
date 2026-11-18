@@ -1,0 +1,83 @@
+name: Bug report
+description: Something in KaiKart or one of its games doesn't work, crashes, or behaves wrong.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Your logs** are on the microSD card in `wiicompiled/UserData/Logs/`: `kaikart.log` (the
+        launcher) and `kaihen.log` (the last game launch). Please attach both.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you continue
+      options:
+        - label: I'm on the latest KaiKart release ("Check for updates" in KaiKart says so).
+          required: true
+        - label: I searched the existing issues and nobody has reported this yet.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: KaiKart version
+      description: It's at the top right of KaiKart's menu.
+      placeholder: "e.g. v0.4.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where does it happen?
+      options:
+        - The KaiKart launcher (menu, setup, updates)
+        - Retro Rewind
+        - Mario Kart Wii
+    validations:
+      required: true
+  - type: dropdown
+    id: category
+    attributes:
+      label: What kind of problem is it?
+      options:
+        - Setup or update fails
+        - Crash or freeze
+        - Graphics
+        - Audio
+        - Controllers
+        - Speed (frame rate)
+        - Online
+        - Saves or settings
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: controllers
+    attributes:
+      label: Controllers
+      description: How you play, and how many players.
+      placeholder: "e.g. handheld; or two players, one sideways Joy-Con each"
+  - type: input
+    id: kaihen
+    attributes:
+      label: kaiHEN version
+      placeholder: "e.g. 20261116"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens?
+      description: What you saw, and what you expected instead. Include any message on screen.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen
+      placeholder: |
+        1. Open KaiKart and choose Retro Rewind
+        2. …
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Drag `kaikart.log`, `kaihen.log` and any screenshots or clips here.
