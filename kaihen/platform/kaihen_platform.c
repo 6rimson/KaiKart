@@ -1051,6 +1051,48 @@ static void extra_clocks_set(void) {
     mutexUnlock(&g_clock_lock);
 }
 
+/* For the log, so a slowdown can be matched to the power: the battery each time it crosses a 10% step,
+ * its voltage state when that changes (at "no performance boost" the console caps the clocks), and
+ * the CPU whenever it reads below the rate this app set. Nothing is written while all is normal. */
+static int g_battery_step = -1, g_voltage_state = -1;
+static uint32_t g_cpu_low_hz;
+
+static const char *voltage_state_name(PsmBatteryVoltageState state) {
+    switch (state) {
+    case PsmBatteryVoltageState_NeedsShutdown: return "needs shutdown";
+    case PsmBatteryVoltageState_NeedsSleep: return "needs sleep";
+    case PsmBatteryVoltageState_NoPerformanceBoost: return "no performance boost";
+    case PsmBatteryVoltageState_Normal: return "normal";
+    default: return "unknown";
+    }
+}
+
+/* Call with g_clock_lock held, after the CPU's rate was read. */
+static void power_log(void) {
+    u32 percent = 0;
+    if (g_psm > 0 && R_SUCCEEDED(psmGetBatteryChargePercentage(&percent)) && (int)(percent / 10) != g_battery_step) {
+        g_battery_step = (int)(percent / 10);
+        fprintf(stderr, "[kaihen] battery %u%%\n", (unsigned)percent);
+    }
+    PsmBatteryVoltageState voltage;
+    if (g_psm > 0 && R_SUCCEEDED(psmGetBatteryVoltageState(&voltage)) && (int)voltage != g_voltage_state) {
+        g_voltage_state = (int)voltage;
+        fprintf(stderr, "[kaihen] battery state: %s\n", voltage_state_name(voltage));
+    }
+    if (g_clock_ready <= 0 || g_cpu_now_hz == 0)
+        return;
+    const uint32_t set_hz = g_raised ? cpu_rate(g_cpu_chosen_mhz) : g_launch_hz;
+    if (g_cpu_now_hz + 1000000u < set_hz) {
+        if (g_cpu_now_hz != g_cpu_low_hz)
+            fprintf(stderr, "[kaihen] CPU reads %.1f MHz, set to %.1f MHz (battery %u%%, %s)\n", g_cpu_now_hz / 1e6,
+                    set_hz / 1e6, (unsigned)percent, g_plugged > 0 ? "plugged in" : "battery");
+        g_cpu_low_hz = g_cpu_now_hz;
+    } else if (g_cpu_low_hz) {
+        fprintf(stderr, "[kaihen] CPU back to %.1f MHz\n", g_cpu_now_hz / 1e6);
+        g_cpu_low_hz = 0;
+    }
+}
+
 /* Once a second, from the watchdog: the power state, and each clock's rate for the menu. */
 static void power_check(void) {
     const int plugged = power_plugged();
@@ -1066,6 +1108,7 @@ static void power_check(void) {
             clkrstGetClockRate(&g_extra[i].session, &g_extra[i].now_hz);
     if (g_clock_ready > 0)
         clkrstGetClockRate(&g_cpu, &g_cpu_now_hz);
+    power_log();
     mutexUnlock(&g_clock_lock);
 }
 
