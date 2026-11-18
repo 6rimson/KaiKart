@@ -238,7 +238,7 @@ launcher() {
   cp "$SRC/kaihen/platform/kaihen_build_info.h" "$stage/launcher/generated/"
   card_files "$stage/launcher/romfs"
   mkdir -p "$stage/launcher/romfs/icons"
-  cp "$SRC"/kaihen/icons/*.jpg "$stage/launcher/romfs/icons/"
+  cp "$SRC"/kaihen/icons/{RetroRewind,WiiCompiled}.jpg "$stage/launcher/romfs/icons/"  # the games' icons, for the menu
   make -C "$stage/launcher" -j"$JOBS" APP_VERSION="$VERSION" \
     KAIKART_MBEDTLS_INCLUDE="$mbedtls_include" KAIKART_MBEDTLS_LIB="$mbedtls_lib" \
     KAIKART_STB_INCLUDE="$OUT/_deps/imgui-src"
