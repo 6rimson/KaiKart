@@ -485,6 +485,22 @@ void BeginRebind(RebindKind kind, uint16_t target, const char* label, bool secon
     }
 }
 
+// Writes a port's current binding for one GameCube button (and its alternate) to the config file.
+void SaveControllerBinding(uint32_t port, uint16_t target) {
+    uint32_t count = 0, altCount = 0;
+    auto* primary = PADGetButtonMappings(port, &count);
+    auto* alternate = PADGetAltButtonMappings(port, &altCount);
+    uint32_t primaryValue = PAD_NATIVE_BUTTON_INVALID, alternateValue = PAD_NATIVE_BUTTON_INVALID;
+    for (uint32_t i = 0; i < count; ++i)
+        if (primary[i].padButton == target) primaryValue = primary[i].nativeButton;
+    for (uint32_t i = 0; i < altCount; ++i)
+        if (alternate[i].padButton == target) alternateValue = alternate[i].nativeButton;
+    std::string config = NativeBindingConfig(primaryValue);
+    if (alternateValue != PAD_NATIVE_BUTTON_INVALID) config += ',' + NativeBindingConfig(alternateValue);
+    for (size_t i = 0; i < kControllerButtons.size(); ++i)
+        if (kControllerButtons[i].padButton == target) RuntimeConfigFile::SetControllerButton(i, config);
+}
+
 void CompleteRebind(uint32_t value) {
     const auto& capture = g_rebind;
     if (capture.kind == RebindKind::Controller) {
@@ -496,18 +512,7 @@ void CompleteRebind(uint32_t value) {
         }
         if (capture.secondary) PADSetAltButtonMapping(capture.port, {value, capture.target});
         else PADSetButtonMapping(capture.port, {value, capture.target});
-        uint32_t count = 0, altCount = 0;
-        auto* primary = PADGetButtonMappings(capture.port, &count);
-        auto* alternate = PADGetAltButtonMappings(capture.port, &altCount);
-        uint32_t primaryValue = PAD_NATIVE_BUTTON_INVALID, alternateValue = PAD_NATIVE_BUTTON_INVALID;
-        for (uint32_t i = 0; i < count; ++i)
-            if (primary[i].padButton == capture.target) primaryValue = primary[i].nativeButton;
-        for (uint32_t i = 0; i < altCount; ++i)
-            if (alternate[i].padButton == capture.target) alternateValue = alternate[i].nativeButton;
-        std::string config = NativeBindingConfig(primaryValue);
-        if (alternateValue != PAD_NATIVE_BUTTON_INVALID) config += ',' + NativeBindingConfig(alternateValue);
-        for (size_t i = 0; i < kControllerButtons.size(); ++i)
-            if (kControllerButtons[i].padButton == capture.target) RuntimeConfigFile::SetControllerButton(i, config);
+        SaveControllerBinding(capture.port, capture.target);
     } else if (capture.kind == RebindKind::MuteHotkey) {
         g_muteHotkey = static_cast<int32_t>(value);
         RuntimeConfigFile::SetMuteHotkey(g_muteHotkey);
@@ -520,6 +525,14 @@ void CompleteRebind(uint32_t value) {
     }
     PADSerializeMappings();
     g_rebind.active = false;
+}
+
+// Leaves a GameCube button unbound on a port ("None"); for L and R that also turns off the trigger.
+void ClearControllerBinding(uint32_t port, uint16_t target) {
+    PADSetButtonMapping(port, {PAD_NATIVE_BUTTON_DISABLED, target});
+    PADSetAltButtonMapping(port, {PAD_NATIVE_BUTTON_INVALID, target});
+    SaveControllerBinding(port, target);
+    PADSerializeMappings();
 }
 
 void DrawRebindPrompt() {
@@ -1862,6 +1875,12 @@ void ConsoleSetCpuBoost(int mode, bool readConfiguration) {
 
 int g_consoleMenuRow = 0;
 int g_consoleMenuPlayer = 0;  // whose controls the button rows show and change
+// A on a button row: a tap changes the button when A comes back up, so a hold can be told apart;
+// holding it this long clears the button instead.
+constexpr uint64_t kConsoleClearHoldMs = 800;
+int g_consoleHoldRow = -1;  // the button row A went down on, or -1
+uint64_t g_consoleHoldStartMs = 0;
+bool g_consoleHoldCleared = false;
 bool g_consoleExitArmed = false;
 // Plus reaches SmileBASIC too, which stops its program, and with it the launcher's link to the PC.
 bool g_consoleLinkLost = false;
@@ -2013,9 +2032,13 @@ void ConsoleMenuInput(int rows) {
              pressed(SDL_GAMEPAD_BUTTON_RIGHT_STICK)) ||
             (triggers && pressed(SDL_GAMEPAD_BUTTON_LEFT_STICK))) {
             g_consoleMenuOpen = !g_consoleMenuOpen;
+            g_consoleHoldRow = -1;
         } else if (g_consoleMenuOpen) {
             int change = 0;
-            if (pressed(SDL_GAMEPAD_BUTTON_SOUTH)) g_consoleMenuOpen = false;
+            if (pressed(SDL_GAMEPAD_BUTTON_SOUTH)) {
+                g_consoleMenuOpen = false;
+                g_consoleHoldRow = -1;
+            }
             if (pressed(SDL_GAMEPAD_BUTTON_DPAD_UP) || stickPushed == 1) g_consoleMenuRow = (g_consoleMenuRow + rows - 1) % rows;
             if (pressed(SDL_GAMEPAD_BUTTON_DPAD_DOWN) || stickPushed == 2) g_consoleMenuRow = (g_consoleMenuRow + 1) % rows;
             if (g_consoleMenuRow != rows - 1) g_consoleExitArmed = false;
@@ -2023,6 +2046,29 @@ void ConsoleMenuInput(int rows) {
             if (pressed(SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || stickPushed == 4) change = 1;
             const bool confirm = pressed(SDL_GAMEPAD_BUTTON_EAST);
             const int playerRow = kConsoleOptionRows, firstButton = kConsoleOptionRows + 1;
+            const bool buttonRow = g_consoleMenuRow >= firstButton && g_consoleMenuRow < rows - 2;
+            const bool playerConnected = PADGetIndexForPort(static_cast<u32>(g_consoleMenuPlayer)) >= 0;
+            bool tapped = false;  // A pressed and released on a button row without being held
+            if (buttonRow && confirm) {
+                g_consoleHoldRow = g_consoleMenuRow;
+                g_consoleHoldStartMs = SDL_GetTicks();
+                g_consoleHoldCleared = false;
+            }
+            if (g_consoleHoldRow >= 0) {
+                if (g_consoleHoldRow != g_consoleMenuRow) {
+                    g_consoleHoldRow = -1;  // moved away while holding: neither
+                } else if (now[SDL_GAMEPAD_BUTTON_EAST]) {
+                    if (!g_consoleHoldCleared && playerConnected &&
+                        SDL_GetTicks() - g_consoleHoldStartMs >= kConsoleClearHoldMs) {
+                        const auto& button = kControllerButtons[static_cast<size_t>(g_consoleMenuRow - firstButton)];
+                        ClearControllerBinding(static_cast<u32>(g_consoleMenuPlayer), button.padButton);
+                        g_consoleHoldCleared = true;
+                    }
+                } else {
+                    tapped = !g_consoleHoldCleared;
+                    g_consoleHoldRow = -1;
+                }
+            }
             if (g_consoleMenuRow == 0 && change != 0) {
                 const int count = static_cast<int>(kConsoleScales.size());
                 SetResolutionScale(kConsoleScales[(ConsoleScaleIndex() + count + change) % count]);
@@ -2058,8 +2104,7 @@ void ConsoleMenuInput(int rows) {
             } else if (g_consoleMenuRow == playerRow && (change != 0 || confirm)) {
                 g_consoleMenuPlayer = (g_consoleMenuPlayer + (change != 0 ? change : 1) + PAD_MAX_CONTROLLERS) %
                                       PAD_MAX_CONTROLLERS;
-            } else if (g_consoleMenuRow >= firstButton && g_consoleMenuRow < rows - 2 && confirm &&
-                       PADGetIndexForPort(static_cast<u32>(g_consoleMenuPlayer)) >= 0) {
+            } else if (buttonRow && tapped && playerConnected) {
                 // The new button is read from that player's own controller.
                 const auto& button = kControllerButtons[static_cast<size_t>(g_consoleMenuRow - firstButton)];
                 g_controllerPort = g_consoleMenuPlayer;
@@ -2248,9 +2293,12 @@ void DrawConsoleMenu() {
             for (uint32_t m = 0; mappings != nullptr && m < count; ++m) {
                 if (mappings[m].padButton == button.padButton) native = mappings[m].nativeButton;
             }
-            row(kConsoleOptionRows + 1 + i,
-                std::string(button.label) + ": " +
-                    (connected ? ConsoleNativeButtonName(native, button.padButton, controller) : "-"));
+            const int index = kConsoleOptionRows + 1 + i;
+            const bool holding = g_consoleHoldRow == index && !g_consoleHoldCleared &&
+                                 SDL_GetTicks() - g_consoleHoldStartMs >= 250;
+            row(index, std::string(button.label) + ": " +
+                           (connected ? ConsoleNativeButtonName(native, button.padButton, controller) : "-") +
+                           (holding ? "  (keep holding to clear)" : ""));
         }
         ImGui::Separator();
         row(rows - 2, "Reset Player " + std::to_string(g_consoleMenuPlayer + 1) + "'s buttons to default");
@@ -2262,12 +2310,19 @@ void DrawConsoleMenu() {
                                            : "Return to launcher");
 #endif
         ImGui::Separator();
-        if (ConsoleSingleJoyCon(ConsolePlayerController(0))) {
-            ImGui::TextDisabled(ConsolePlayerController(0) == ConsoleController::JoyConLeft
-                                    ? "Stick: move, change. Right arrow: change button. Down arrow: close."
-                                    : "Stick: move, change. X: change button. A: close.");
-        } else {
-            ImGui::TextDisabled("D-pad: move, change. A: change button. B: close.");
+        {
+            // The menu follows player 1's controller; a single Joy-Con's buttons by their printed names.
+            const ConsoleController menuController = ConsolePlayerController(0);
+            const bool single = ConsoleSingleJoyCon(menuController);
+            const bool left = menuController == ConsoleController::JoyConLeft;
+            const char* confirmName = left ? "Right arrow" : single ? "X" : "A";
+            const char* closeName = left ? "Down arrow" : single ? "A" : "B";
+            const bool onButtonRow = g_consoleMenuRow > kConsoleOptionRows && g_consoleMenuRow < rows - 2;
+            const std::string hint = std::string(single ? "Stick" : "D-pad") + ": move, change. " + confirmName +
+                                     (onButtonRow ? std::string(": change button, hold to clear. ")
+                                                  : std::string(": choose. ")) +
+                                     closeName + ": close.";
+            ImGui::TextDisabled("%s", hint.c_str());
         }
         DrawRebindPrompt();
     }
