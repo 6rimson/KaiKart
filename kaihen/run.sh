@@ -1,5 +1,5 @@
 #!/bin/bash
-# WiiCompiled + Retro Rewind as a kaiHEN app (.nro), built in Docker. Guide: kaihen/README.md.
+# WiiCompiled + Retro Rewind as a kaiHEN app (.nro), built in Docker. Guide: README.md.
 #   kaihen/run.sh setup        everything below in order: sources, translate, configure, build
 #   kaihen/run.sh sources      fetch Dawn and SDL3 at their pins (kaihen/dependencies.json), patched
 #   kaihen/run.sh translate    translate your game (and Retro Rewind, with Retro WFC)

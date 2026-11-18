@@ -2,7 +2,7 @@
 # Builds KaiKart and a game from your own disc and puts them on a microSD card (Apple Silicon Mac).
 # Run it in Terminal: kaihen/easy-build.sh (or drag this file into a Terminal window and press
 # Return). It asks for your disc, your Retro Rewind folder and the card, then runs the steps in
-# kaihen/README.md. Run it again at any time: steps already done are skipped, so it also picks up
+# README.md. Run it again at any time: steps already done are skipped, so it also picks up
 # after a failure or an update.
 set -euo pipefail
 cd "$(dirname "$0")/.."

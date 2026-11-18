@@ -64,7 +64,7 @@ translate() {
   local inputs=(Assets/main.dol Assets/StaticR.rel)
   [[ "$PRODUCT" == RetroRewind ]] && inputs+=("$rr/Binaries/Code.pul" "$wfc")
   for input in "${inputs[@]}"; do
-    [[ -f "$input" ]] || { echo "Missing $input: see kaihen/README.md, step 2" >&2; exit 1; }
+    [[ -f "$input" ]] || { echo "Missing $input: see README.md, "Building from source", step 1" >&2; exit 1; }
   done
   local jobs project=(--project projects/mkwii/recomp.yml)
   jobs="$(nproc)"
@@ -118,7 +118,7 @@ build_info() {
 #define KAIHEN_UPDATE_REPO \"${KAIHEN_UPDATE_REPO:-6rimson/KaiKart}\""
   if [[ "$PRODUCT" == RetroRewind ]]; then
     [[ -f "$rr/Binaries/Code.pul" && -f "$rr/version.txt" ]] || {
-      echo "Missing $rr: see kaihen/README.md, step 2" >&2
+      echo "Missing $rr: see README.md, "Building from source", step 1" >&2
       exit 1
     }
     text+="
@@ -196,7 +196,7 @@ build() {
   nacptool --create "$title" "6rimson" "$VERSION" "$OUT/$PRODUCT.nacp"
   # The wiicompiled folder's own small files, without any game files: in the app (romfs), which
   # copies what a card lacks at its first launch (kaihen_platform.c, card_setup), and in
-  # kaihen/dist/card, the card's layout to copy by hand (kaihen/README.md).
+  # kaihen/dist/card, the card's layout to copy by hand.
   local romfs="$OUT/romfs"
   card_files "$romfs"
   elf2nro "$elf" "/dist/$PRODUCT.nro" --nacp="$OUT/$PRODUCT.nacp" --icon="$icon" --romfsdir="$romfs"

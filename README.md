@@ -1,282 +1,344 @@
-# KaiKart: Mario Kart Wii and Retro Rewind on Switch 2
+# KaiKart
 
-KaiKart is an unofficial fork of WiiCompiled for the Nintendo Switch 2. It plays Retro Rewind and
-plain Mario Kart Wii as a homebrew app, started from hbmenu under
-[kaiHEN](https://github.com/ouncebrew/kaihen), and sets itself up on the console from your own
-disc image. It's an experimental project, shared as is for anyone who wants to try it or build on
-it. It isn't an official WiiCompiled project, so please don't report its problems to the
+A Nintendo Switch 2 port of [WiiCompiled](https://github.com/patchzyy/Wiicompiled), a static
+recompilation of Mario Kart Wii into native code. KaiKart runs as a homebrew app under kurumuz's
+[kaiHEN](https://github.com/ouncebrew/kaihen), and supports both plain Mario Kart Wii and Retro Rewind. It includes a launcher that handles setup using your own disc image, along with built-in support for installing and updating Retro Rewind, all directly on the console without requiring a PC.
+
+The game runs as statically recompiled ARM64 code, built using ouncebrew's [Switch 2 devkit](https://github.com/ouncebrew/ounce-devkit) and rendered through its Vulkan driver, OunceVK.
+
+KaiKart is an unofficial fork, so please report its problems here rather than to the
 WiiCompiled team.
 
-**Start here: [kaihen/README.md](kaihen/README.md)** for how to play, controls and multiplayer,
-updates and known issues. You need your own Mario Kart Wii PAL disc; no game files are in this
-repository or its releases.
+> [!IMPORTANT]
+> There are no game files, textures, music or disc images in this project or its releases. You need
+> your own Mario Kart Wii PAL disc (`RMCP01`). A release holds the KaiKart launcher and two game
+> builds with WiiCompiled's translation of the game's code; Retro Rewind is downloaded from its own
+> server.
 
-The older version for [HBLauncher](https://github.com/ravensclawx/HBLauncher) is on the
+The older version, for HBLauncher and SmileBASIC, is on the
 [`switch2-hblauncher`](https://github.com/6rimson/KaiKart/tree/switch2-hblauncher)
 branch.
 
-The original WiiCompiled README follows.
+## Play
 
----
+**You need:**
 
-<img width="4190" height="1232" alt="wiicomplogofinalfinalfinalev2MADEBY_INKWRECK_plzcredit" src="https://github.com/user-attachments/assets/df7a3f2e-5336-479a-b4c0-968dd578726d" />
+- **A Switch 2 that can run kaiHEN** and reach hbmenu. See
+  [kaiHEN's README](https://github.com/ouncebrew/kaihen) for how to start it.
+- **Your own Mario Kart Wii PAL disc image** (`RMCP01`), unmodified, as an `.iso` or `.wbfs` file.
+  A `.wbfs` that's split into `.wbfs`, `.wbf1`, `.wbf2` and so on works too.
+- **About 6 GB free on the microSD card**, plus room for the disc image itself (up to 4.4 GB)
+  until the first start is done.
+- **An internet connection** on the console for the first start.
 
-# WiiCompiled
+**Steps:**
 
-<p align="center">
-  <a href="https://github.com/patchzyy/Wiicompiled/releases"><img alt="Windows 10 / 11, x64" src="https://img.shields.io/badge/Windows-10%20%2F%2011%20%C2%B7%20x64-0078D4"></a>
-  <a href="https://github.com/patchzyy/Wiicompiled/releases"><img alt="Linux, x64 / ARM64" src="https://img.shields.io/badge/Linux-x64%20%2F%20ARM64-FCC624?logo=linux&amp;logoColor=white"></a>
-  <a href="https://github.com/patchzyy/Wiicompiled/releases"><img alt="macOS 14+, Apple Silicon" src="https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20Silicon-0A84FF?logo=apple&amp;logoColor=white"></a>
-</p>
-<p align="center">
-  <a href="#building-from-source"><img alt="PowerPC static recompilation" src="https://img.shields.io/badge/PowerPC-static%20recompilation-FF9F0A"></a>
-  <a href="#retro-rewind"><img alt="Retro Rewind supported" src="https://img.shields.io/badge/Retro%20Rewind-supported-FF375F"></a>
-  <a href="https://github.com/TeamWheelWizard/WheelWizard/releases"><img alt="Install with Wheel Wizard" src="https://img.shields.io/badge/install%20with-Wheel%20Wizard-8B5CF6"></a>
-  <a href="https://github.com/patchzyy/Wiicompiled/releases"><img alt="Total downloads" src="https://img.shields.io/github/downloads/patchzyy/Wiicompiled/total?color=00B8D9&amp;logo=github"></a>
-  <a href="LICENSE"><img alt="License: GPLv3" src="https://img.shields.io/badge/license-GPLv3-2EA44F?logo=gnu&amp;logoColor=white"></a>
-</p>
+1. Download `KaiKart-<version>.nro` from the
+   [latest release](https://github.com/6rimson/KaiKart/releases/latest) and put it in
+   the microSD card's `switch` folder.
+2. Make a folder named `wiicompiled` at the root of the card, and put your disc image in it.
+3. Put the card in the console, start kaiHEN, open hbmenu, and choose **KaiKart**.
+4. Choose **Retro Rewind** or **Mario Kart Wii**.
 
-A native PC port of Mario Kart Wii, made with static recompilation.
+The first start of each game sets it up. It downloads the game build, sets up your disc, and, for
+Retro Rewind, downloads Retro Rewind (about 2 GB). It takes about 10 minutes, mostly for the card.
+Keep the console on and the card in. After that, games start straight away, and you can delete the
+disc image to free space.
 
-There's no emulator in the loop, no interpreter, no JIT, no PowerPC
-anywhere at runtime.
+The first launch then spends about 15-20 seconds on the title screen setting up its saved shaders.
+Wait there until the shader message is gone before racing.
 
-> [!IMPORTANT]
-> There is no Nintendo code, no assets and no game data anywhere in this project or its releases.
-> You need your own legally dumped copy of the PAL, NTSC-U, or NTSC-J version of the game. Setup only ships the
-> toolchain, the translation runs on your machine against your disc image, and nothing ever gets
-> uploaded.
+### Coming from v0.3
 
-[What is a github, I just want to play](https://github.com/TeamWheelWizard/WheelWizard/releases/latest)
+KaiKart uses the `wiicompiled` folder you already have, with your saves and settings. Put
+`KaiKart-<version>.nro` in `switch`, and delete the old `switch/RetroRewind.nro` and
+`switch/WiiCompiled.nro`: they're no longer updated.
 
----
+### Your saves
 
-## What it does
+Saves stay on the card when KaiKart or Retro Rewind updates. To bring saves you already have, from
+Dolphin or another WiiCompiled port, copy them onto the card:
 
-**Unlocked framerate with interpolation.** 
-The original game is hard-locked to 60 fps. The runtime can generate interpolated frames in between, so on a
-120/144 Hz monitor things genuinely look smoother.
+| What | Where it goes on the card | When |
+|---|---|---|
+| **Retro Rewind save** (`rksys.dat`): licences, unlocks, friends | `wiicompiled/RetroRewind/riivolution/save/RetroWFC/RMCP/rksys.dat` | Any time the game isn't running |
+| **NAND folder**: your Miis, plain Mario Kart Wii's save, Retro Rewind's settings, and online login data | `wiicompiled/UserData/NAND` | Before the first start (later, it replaces the NAND the game made) |
 
-> [!WARNING]
-> Interpolation is experimental right now and will show artifacts in specific scenarios.
+For Retro Rewind, bring both if you can: the `rksys.dat` has your progress, and the NAND has the
+Miis your licences use. In Dolphin, the NAND is the `Wii` folder in Dolphin's user folder, and the
+Retro Rewind save is the `rksys.dat` in a `RetroWFC/RMCP` folder under its `Load` folder.
 
-**Any aspect ratio you want.** 
-Drag the window bigger, wider, whatever, the camera adjusts
-live.
+## Updates
 
-**Native rendering via aurora.** 
-The graphics layer is built on
-[aurora](https://github.com/encounter/aurora). Aurora is a source-level GameCube & Wii compatibility layer.
+Open KaiKart and choose **Check for updates**. It looks for a newer KaiKart release on GitHub,
+and offers to download it: first the new game builds, then the launcher itself.
 
-**High internal resolution.** 
-Play at several times the console's resolution.
+**Retro Rewind updates** come in two kinds:
 
-**Music ducking.** 
-Start playing something else, Spotify, a YouTube video, and
-the game automatically mutes its own music until the other audio stops. Optional, if you'd
-rather it didn't. Windows uses system media controls and Linux uses MPRIS players.
-On macOS 14.2 or later, this detects other apps with active audio output and excludes
-the game's own audio. Apps that keep an output stream running silently can keep
-game music muted even when nothing is audible.
+- **Updates that change Retro Rewind's code** need a new KaiKart release, because the game's code
+  is translated ahead of time. Until there is one, KaiKart keeps playing the version it supports,
+  and "Check for updates" says a newer Retro Rewind is out.
+- **Each KaiKart release** installs the Retro Rewind version it supports the next time you start
+  Retro Rewind, with Retro Rewind's own small update files when it can. Files you added to the
+  `RetroRewind6` folder, such as saved ghosts, are kept.
 
-**An in-game settings bar.** 
-Press **F10** while the game window has focus:
-- Internal resolution
-- FPS counter
-- MetalFX spatial upscaling on supported macOS GPUs
-- Controller assignment for all four ports
-- Full per-controller button mapping, including the bumpers
-- Dolphin-syntax input expressions and GCPadNew.ini import
-- Controller vibration on/off
-- Volume, instant mute, and the music ducking toggle
+## Controls and multiplayer
 
-Everything you change is saved to `Config.toml` on the spot and restored next launch.
+Up to four players can race in split screen. Each player can use a Pro Controller, a pair of
+Joy-Cons, or a single Joy-Con held sideways.
 
-**Dolphin-compatible input expressions.** 
-Each GameCube control can carry an expression in Dolphin's input syntax, with the same operators
-and the same functions.
-A Dolphin `GCPadNew.ini` can be imported directly from the F10 bar.
+**For local multiplayer, set up the controllers first**, in the console's HOME Menu under
+Controllers → Change Grip/Order. Hold each single Joy-Con sideways and press SL + SR on it. The
+order on that screen is the player order in the game.
 
-**Vibration toggle.** 
-Force feedback can be turned off for every port at once.
-The official Wii U / Switch GameCube adapter (WUP-028) works too; as with Dolphin, on Windows the
-adapter must be switched to the WinUSB driver once (Zadig).
+Mario Kart Wii is played here with a GameCube controller's buttons, and each Switch 2 controller
+stands in for one. The port menu uses the GameCube names too, so they're in the first column:
 
-**Real Wii Remotes over Bluetooth.**
-Pair a Wii Remote with Windows (Settings > Bluetooth > Add device, press 1+2 or SYNC, leave the
-PIN empty)
+| GameCube button | Action | Pro Controller, Joy-Con pair | Right Joy-Con, sideways | Left Joy-Con, sideways |
+|---|---|---|---|---|
+| A | Accelerate, OK | A | X | Right arrow |
+| B | Brake, back | B | A | Down arrow |
+| X | Look back (same as Z) | X | – | – |
+| Y | Not used in races | Y | – | – |
+| Z | Look back | R | B | Left arrow |
+| L | Use item | ZL | SL | SL |
+| R | Drift, hop | ZR | SR | SR |
+| Start | Pause | + | + | − |
+| D-pad | Tricks | D-pad | Y, with the stick for the direction | Up arrow, with the stick for the direction |
+| Stick | Steer | Left stick | Stick | Stick |
 
-Known limitations of the Wii Remote path:
-- No IR pointer yet: menus are navigated with the D-pad and A (the game treats the remote as
-  pointing away from the screen).
-- Battery level is not reported to the game and the remote's speaker is not implemented.
-- Only the Wii Remote's own accelerometer is calibrated; the Nunchuk's uses SDL's fixed zero point.
-- The Classic Controller's L/R triggers reach the game as digital (full pull on click): SDL does not
-  expose their analog travel.
-- Turn the Wii Remote support off in that menu if you use a Mayflash DolphinBar, which already
-  presents the remote as a regular gamepad.
+A single Joy-Con has no spare buttons for X and Y, so it looks back with Z. Each player can change
+their buttons in the [port menu](#the-port-menu).
 
-## Requirements
+**Split screen and frame rate:** for races with two or more players, set the frame rate to 30 FPS
+in Retro Rewind's settings. At 60 FPS, split screen asks more than the console has and runs at
+about 30-38 FPS, unevenly.
 
-- Windows 10 or 11, 64-bit
-- GPU: GTX 1650 / RX 6400 / Arc A310 or higher
-- CPU: Intel Core i5-8400 / AMD Ryzen 5 2600 (4c/6c, ~3.5GHz+) or higher
-- About 20 GB of free disk space during installation (Final game size ~5 GB)
-- macOS 12 (Monterey) or later on Apple Silicon (`arm64`) or Intel (`x86_64-v3`); pre-Haswell Intel CPUs are unsupported
-- On macOS, a Metal-capable GPU and Apple Xcode Command Line Tools (Setup opens Apple's installer when they are missing)
-- A clean, unmodified **PAL `RMCP01`**, **NTSC-U `RMCE01`**, or **NTSC-J `RMCJ01`** disc image of Mario Kart Wii, dumped by you. ISO, GCM,
-  GCZ, CISO, WBFS, WIA and RVZ are accepted.
+## The port menu
 
-> [!NOTE]
-> GPU/CPU minimums are set by driver support and D3D12/Vulkan feature requirements, not by the game's actual demands.
+Open it during the game with **L + R + right stick press**, or **SL + SR + stick press** on a
+single Joy-Con. Move with the D-pad or the stick, change a setting with left and right, press A to
+choose and B to close. Everything here is saved.
 
-Only the clean PAL, NTSC-U, and NTSC-J revisions will work. Anything else (NTSC-K, patched executables) is rejected outright.
+| Setting | Default | Notes |
+|---|---|---|
+| Resolution | 1.0× | Change it in menus, not during a race. |
+| Show FPS | Off | |
+| Volume | 100% | |
+| CPU clock | 1702 MHz | The system's own rate is 1100.8 MHz. |
+| Memory clock | System | 2133 MHz handheld. Raised rates apply only on a charger. |
+| GPU clock | System | 561 MHz handheld. Raised rates help at 2× and 3× resolution; only on a charger. |
+| Controls for | Player 1 | Whose buttons the rows below show, with their controller. |
+| Buttons | See [Controls](#controls-and-multiplayer) | Press A on a row, then the new button. Pressing nothing for 10 seconds keeps the old one. |
+| Reset buttons to default | | For the player shown. |
+| Quit to HOME Menu | | Press A twice. Holding **+ and −** together also quits. |
 
-> [!NOTE]
-> Nobody here will tell you where to get the game. Dumping your own disc is on you, and links to
-> game files won't be provided or tolerated.
+Below the clocks, the menu shows whether the console is on a charger.
 
-## Installing
+## Known issues
 
-For an easy experience, use [Wheel Wizard](https://github.com/TeamWheelWizard/WheelWizard). Pick your clean PAL `RMCP01`, NTSC-U `RMCE01`, or NTSC-J `RMCJ01`
-image under Settings, turn on **WiiCompiled (beta)**, and hit install from the Home page.
-Wheel Wizard downloads the setup tool from this repo and walks you through install, updates and
-launching. The backend itself is deliberately command-line only, Wheel Wizard is a wrapper around it.
+- **One game per kaiHEN session.** Starting a second game in the same session crashes, so each
+  game quits to the HOME Menu, which closes the app, instead of returning to hbmenu. To play
+  again, hold R while starting a game to open hbmenu. If a second game is started anyway, it says
+  so and quits instead of crashing.
+- **Raised memory and GPU clocks need a charger.** On battery, the console halves the CPU's real
+  speed when memory or the GPU run above their handheld rates. So KaiKart runs them as you chose
+  only while plugged in, and at the handheld rates on battery. The CPU keeps its rate either way.
+- **Each launch spends about 15-20 seconds setting up its saved shaders** on the title screen. New
+  places also stutter the first time while their shaders build. They're saved after that.
+- **PAL discs only** (`RMCP01`) for now. US and Japanese discs need their own game builds.
+- **Modified discs don't work.** The game's code is translated from the original disc, so KaiKart
+  checks that the disc's code is unchanged. Mods that change files on the disc, such as texture
+  packs, aren't supported yet.
+- **A thin black line can show below the race minimap** at some resolutions (1× and 2×, not 1.5×).
+  It's an upstream WiiCompiled bug,
+  [patchzyy/Wiicompiled#397](https://github.com/patchzyy/Wiicompiled/issues/397).
+- **Change the resolution outside races.** Changing it during a race can break the graphics until
+  you restart the game.
 
-### macOS
-
-Download `WiiCompiled-Setup.pkg` from this repository's Releases page and open it. The universal
-package selects the appropriate bundled tools for the host architecture, supporting both Apple Silicon (`arm64`)
-and Intel (`x86_64`) Macs. It installs **WiiCompiled Setup** in Applications; open that app, choose
-your clean PAL `RMCP01`, NTSC-U `RMCE01`, or NTSC-J `RMCJ01` disc image, and select either the base game or Retro Rewind. For Retro Rewind, choose the `RetroRewind6` folder
-or its parent folder.
-
-Setup verifies and extracts the image locally, then translates and compiles the native app on your
-Mac. On a first run it may ask macOS to install Xcode Command Line Tools; complete Apple's installer,
-then open Setup again. When the build completes, Setup asks for administrator approval once to install
-`WiiCompiled.app` (and, if selected, `RetroRewind.app`) in `/Applications`.
-
-Setup opens Terminal while it works, so the extraction and build progress—and any error that needs
-reporting—remain visible.
-
-> [!CAUTION]
-> Only take builds from this repository's
-> [Releases](https://github.com/patchzyy/Wiicompiled/releases) page. If someone's sharing an
-> installer through Discord or some random download site, don't touch it!!
-
-## A note on related projects
-
-WiiCompiled, Wheel Wizard, Retro rewind and other related projects are developed
-**independently** and each has its **own** contribution rules and all have their own
-rules. What applies here does not automatically apply there,
-and vice versa. Check each project's own CONTRIBUTING and README files.
-
-## Retro Rewind
-
-[Retro Rewind](https://wiki.tockdom.com/wiki/Retro_Rewind), ZPL's Mario Kart Wii mod distribution,
-can be built as its **own static profile**: instead of applying `Code.pul` as runtime patches,
-the Kamek/Pulsar code is statically translated together with the base game into a separate native
-executable.
-
-Wheel Wizard drives this too.
+If something goes wrong, `wiicompiled/UserData/Logs/` on the card has the logs: `kaikart.log` from
+the launcher, and `kaihen.log` from the last game launch.
 
 ## Building from source
 
-Owning the game is still required even if you compile everything yourself.
+You don't need this to play. It's for working on KaiKart, or for building it yourself instead of
+downloading a release. Expect an hour or two for the first build; most of it runs on its own.
 
-You'll need: .NET 8 SDK, CMake, Ninja, and LLVM/Clang (the shipped build uses LLVM-MinGW targeting
-`x86-64-v3`).
+### What you need
 
-Build the translator:
+- **An Apple Silicon Mac.** The scripts should also work on aarch64 Linux, but I haven't tried.
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) with its memory set to at
+  least 8 GB (Settings → Resources), Git and Python 3 (both come with `xcode-select --install`),
+  and about 40 GB of free space.
+- **Your own Mario Kart Wii PAL disc (`RMCP01`)**, and for Retro Rewind its latest
+  `RetroRewind6` folder.
 
-```powershell
-dotnet build translator/Translator.sln -c Release
+### Get this repository
+
+```sh
+mkdir -p ~/Switch2 && cd ~/Switch2
+git clone --recursive --branch switch2-kaihen https://github.com/6rimson/KaiKart.git
+cd KaiKart
 ```
 
-The default test suite needs no binaries and no host C++ compiler, so you can hack on the
-translator without any game data around.
+`--recursive` also fetches aurora, the graphics library WiiCompiled includes. Run every command
+below from this folder.
 
-For everything beyond that, feeding in your own `main.dol`/`StaticR.rel`, running the
-translation, generating the manifest and build graph, and compiling, see [`translator/README.md`](translator/README.md).
+### The easy way
 
-For a step-by-step guide on compiling both WiiCompiled and Retro Rewind from source on macOS (Apple Silicon), see the [macOS Build Guide](docs/building-macos.md).
+Run `kaihen/easy-build.sh` in Terminal (or drag the file into a Terminal window and press Return).
+It asks for:
 
-## FAQ
+- Retro Rewind or plain Mario Kart Wii;
+- your disc (drag the file into the window);
+- your `RetroRewind6` folder;
+- your microSD card, once the build is done.
 
-**Is this an emulator?**
-No. Everything is compiled to native code before you ever press play. At runtime there's nothing
-emulating a Wii CPU or GPU.
+It extracts and checks the disc, downloads the Retro WFC payload, builds the game and KaiKart, and
+copies everything to the card. If something fails, or after an update, run it again: it skips
+what's already done. The build's log is in `build/build-log.txt`.
 
-**Do you provide the game?**
-No. Don't ask. Nothing in this repo or any release contains Nintendo code or assets.
+The steps below do the same by hand.
 
-**Why does setup take so long?**
-Because we **don't** ship the translated binary, most other recomp projects do, but we
-don't want to risk it right now, setup has to run a static recompiler over the whole game
-and then throw a C++ compiler at the result. It's a **one-time cost** on your machine.
+### 1. Put your files in place
 
-**Which game version works?**
-Clean PAL `RMCP01`, NTSC-U `RMCE01`, and NTSC-J `RMCJ01`. NTSC-K `RMCK01` and modified executables are **rejected**. Translating
-them against the wrong manifest would give you a subtly broken game that's miserable to debug for us.
+**Your disc.** Extract it into `Assets/DATA` with [nodtool](https://github.com/encounter/nod/releases)
+(`.iso`, `.wbfs`, `.rvz` and similar all work), then copy out the two files the translator reads:
 
-**Can I recompile other GameCube/Wii games with it?**
-The translator itself handles DOLs and RELs generically, see
-`projects/examples/generic-dol.yml`. The catch is that a *playable* port also needs a runtime:
-audio, input, GX, everything the game touches.
+```sh
+curl -fsSL "https://github.com/encounter/nod/releases/download/v2.0.0-alpha.10/nodtool-macos-arm64" -o ~/Switch2/nodtool
+chmod +x ~/Switch2/nodtool && xattr -d com.apple.quarantine ~/Switch2/nodtool 2>/dev/null
+mkdir -p Assets/DATA && ~/Switch2/nodtool extract /path/to/RMCP01.iso Assets/DATA
+cp Assets/DATA/sys/main.dol Assets/DATA/files/rel/StaticR.rel Assets/
+shasum -a 256 Assets/main.dol Assets/StaticR.rel
+```
 
-**The game crashed / stopped with an error.**
-Errors are deliberately loud instead of quietly swallowed. Send a report along with the run log
-from `%LOCALAPPDATA%\WiiCompiled\Logs`.
+**You should see** these two hashes, which mean a clean PAL disc:
 
-**Will you fix original bugs?**
-Not in the base game, behavior identical to real hardware is the goal. Only report things where this port differs
-from the original game. As for Retro Rewind, some base-game behavior **is** patched, so if it differs from the
-base game, that's normal. If Retro Rewind behavior differs between Dolphin/Wii and WiiCompiled, open an issue on GitHub.
+- `Assets/main.dol`: `80d18895b39c63bd80f457398bfcbb91b7d16ac116a41a88967e954080155b05`
+- `Assets/StaticR.rel`: `16d9d146112541fefea701ecb5bc1a496f9d50e4a752fbb5b6778e7c6399f67d`
 
-**How accurate are the physics?**
-100% - this is proven by in-game ghosts. Since ghosts are replay files based on inputs rather
-than tracked positions, matching ghosts prove the physics match across Dolphin/Wii/WiiCompiled.
+**Retro Rewind.** Get the latest [Retro Rewind](https://wiki.tockdom.com/wiki/Retro_Rewind) release
+(for example with [Wheel Wizard](https://github.com/TeamWheelWizard/WheelWizard)), and copy its
+`RetroRewind6` folder, the one that contains `Binaries/Code.pul`:
 
-**Is it done?**
-Not fully. The game is in a state where everything should be playable and the physics do match
-100% with the original game, but compatibility, rendering, networking and performance are all
-actively being worked on. If you do find an issue, we strongly encourage you to open one on
-GitHub so we can take a look at it.
+```sh
+mkdir -p PulsarPacks/completed/RetroRewind
+cp -R /path/to/RetroRewind6 PulsarPacks/completed/RetroRewind/
+```
+
+**Online play.** Download the Retro WFC payload; the build checks its signature:
+
+```sh
+mkdir -p build/retro-wfc/binary
+curl -fsSL --retry 3 "https://rwfc.net/api/wfc/payload?g=RMCPD00" -o build/retro-wfc/binary/payload.RMCPD00.bin
+```
+
+### 2. Build
+
+```sh
+kaihen/run.sh setup
+```
+
+The first time, this downloads and builds what it needs: the Switch 2 devkit (from GitHub), the
+build tools image, and Dawn and SDL3. Then it translates your game, builds it, and builds the
+launcher. **You should see** `kaihen/dist/RetroRewind.nro` and `kaihen/dist/KaiKart.nro` at the
+end.
+
+`setup` is five steps you can also run one at a time: `sources`, `translate`, `configure`, `build`
+and `launcher`. If your Mac runs out of memory partway, run `KAIHEN_JOBS=4 kaihen/run.sh build`.
+
+For plain Mario Kart Wii, which needs only the disc, put `KAIHEN_PRODUCT=WiiCompiled` in front of
+each command, for example `KAIHEN_PRODUCT=WiiCompiled kaihen/run.sh setup`.
+
+### 3. Put it on the microSD card
+
+Put the card in the Mac. macOS shows it under `/Volumes/` with the card's name (the name Finder
+shows; `ls /Volumes` lists them). With your card's name in place of `SWITCH`:
+
+```sh
+kaihen/run.sh sd /Volumes/SWITCH
+```
+
+This copies KaiKart to `switch/`, the game build to `wiicompiled/apps/`, and your extracted disc
+and Retro Rewind folder to `wiicompiled/`. The first time takes a while. To start from saves you
+already have, add `--nand /path/to/NAND` or `--rr-save /path/to/rksys.dat` after the card.
+
+It never overwrites your files: folders and settings already on the card are left as they are,
+and only the `.nro` files, `dsp_coef.bin` and `cacert.pem` are replaced. An interrupted copy is
+redone the next time you run it.
+
+### Updating a build
+
+```sh
+git pull --recurse-submodules
+kaihen/run.sh build
+kaihen/run.sh launcher
+kaihen/run.sh sd /Volumes/SWITCH
+```
+
+`--recurse-submodules` also moves aurora to the version this one expects. If the release notes
+say a step such as `translate` is needed, run it before `build`.
+
+After a Retro Rewind update that changes its code, replace the `RetroRewind6` folder in
+`PulsarPacks/completed/RetroRewind/`, run `kaihen/run.sh translate` before `build`, and add
+`--replace-rr` to the `sd` command.
+
+### Release builds
+
+`kaihen/run.sh release` builds both games and the launcher with the repository's icons, and
+writes `kaihen/dist/release/` with `KaiKart-<version>.nro`, `RetroRewind-<version>.nro`,
+`WiiCompiled-<version>.nro` and `SHA256SUMS`. The launcher's updates read these names from the
+GitHub release.
+
+### Settings for testing
+
+These go in `wiicompiled/settings.env` on the card, with the clocks the port menu saves:
+
+- `MKW_PERF_STATS=1` logs FPS and frame timing to `wiicompiled/UserData/Logs/kaihen.log`.
+- `KAIHEN_PROFILE=1` samples the game during races into `UserData/Logs/profile.bin`, for speed
+  work.
+
+## How it's built
+
+- **The games:** WiiCompiled's translated game and runtime, compiled with Clang for the devkit's
+  newlib and libounce, linked by its GCC, with the shipped PGO profile (`kaihen/pgo/`).
+- **The launcher** (`kaihen/launcher/`): a small libnx app drawn in software, which sets up the
+  games (`kaihen/shared/`) and starts them through kaiHEN's loader.
+- **`kaihen/platform/`:** the layer between the game and the console: startup, the screen,
+  threads on their own cores, clocks, the power state and quitting.
+- **`kaihen/patches/`:** one patch each for Dawn, SDL3 (with audio and controller drivers on
+  libnx) and aurora. `kaihen/dependencies.json` pins the devkit, Dawn and SDL3.
+- **The scripts:** `kaihen/easy-build.sh` asks the questions and calls `kaihen/run.sh`, which
+  starts Docker and runs `kaihen/docker/build.sh` inside it for each step.
+- **Docker volumes:** `wiicompiled-kaihen-work` (sources and the translated game) and
+  `wiicompiled-kaihen` (the build). `KAIHEN_WORK` and `KAIHEN_VOLUME` pick others.
 
 ## AI usage
-AI coding tools were used during development of this project. 
-All translated output is verified against real hardware behavior and most importantly, physics accuracy is proven synced across Wii, Dolphin, and WiiCompiled (see FAQ). 
+
+Much of KaiKart was developed with the assistance of AI coding tools, including the console-specific code, launcher, debugging, and documentation. All changes were tested on real Nintendo Switch 2 hardware before being incorporated into the project. The core gameplay remains unchanged, as KaiKart focuses on adapting WiiCompiled to run on the console.
 
 ## Credits
-- **inkwreck** - making the logo
-- **[aurora](https://github.com/encounter/aurora)** - the GX rendering/windowing backend this
-  project's whole graphics layer sits on. MIT licensed.
-- **[Dawn](https://dawn.googlesource.com/dawn)** - Google's WebGPU implementation, powering
-  aurora's Direct3D, Vulkan and OpenGL backends.
-- **[Dolphin Emulator](https://github.com/dolphin-emu/dolphin)** - an invaluable reference for Wii
-  hardware behavior during development, plus the source of the free DSP coefficient ROM and the
-  unmodified default WiiConnect24 bootstrap tree bundled with the runtime.
-- **[Retro Rewind](https://wiki.tockdom.com/wiki/Retro_Rewind)** by ZPL and team - the mod
-  distribution this project supports.
-- **[Wheel Wizard](https://github.com/TeamWheelWizard/WheelWizard)** - the mod manager this
-  project integrates with as a launch backend.
-- Everyone in the static recompilation community.
 
-Bundled third-party components and their licenses live in
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+- **[WiiCompiled](https://github.com/patchzyy/Wiicompiled)** by patchzyy and contributors: the
+  recompilation this is built on.
+- **[kaiHEN](https://github.com/ouncebrew/kaihen)** by kurumuz: the Switch 2 homebrew environment
+  and hbmenu this runs in.
+- **[ounce-devkit](https://github.com/ouncebrew/ounce-devkit)**, libounce and OunceVK by
+  ouncebrew: the Switch 2 toolchain, system library and Vulkan driver.
+- **[DriftDroid](https://github.com/dorPXP/driftdroid)** by dorPXP: the disc image importer
+  (`kaihen/shared/wii_disc_extractor.cpp`, GPLv3), and its Switch 1 port's fixes and ideas.
+- **[KartPadNX](https://github.com/KawaiiBunga/KartPadNX)** by KawaiiBunga: a Switch 1 port whose
+  ideas (such as PGO) helped throughout.
+- **RavensClawX's [Twilight Princess](https://github.com/ravensclawx/TwilightPrincess-HBLauncher)
+  port**: parts of the Dawn and aurora patches, and the layout of the SDL drivers (MIT,
+  `kaihen/patches/LICENSE.tp-integration`).
+- **[Retro Rewind](https://wiki.tockdom.com/wiki/Retro_Rewind)** by ZPL and team, and
+  **[Retro WFC](https://rwfc.net)**.
+- **[aurora](https://github.com/encounter/aurora)** by encounter,
+  **[Dawn](https://dawn.googlesource.com/dawn)** by Google, **[SDL](https://github.com/libsdl-org/SDL)**,
+  [mbed TLS](https://github.com/Mbed-TLS/mbedtls), stb_truetype and libjpeg-turbo.
 
-
-## License
-
-WiiCompiled is free software: you can redistribute it and/or modify it under the terms of the
-[GNU General Public License, version 3](LICENSE) as published by the Free Software Foundation.
-
-WiiCompiled is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
-even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-General Public License for more details.
-
-Any mkwii distribution making use of WiiCompiled must be licensed under GPL v3.0.
-
-Not affiliated with, endorsed by, or associated with Nintendo. Mario Kart Wii is a trademark of
-Nintendo. No Nintendo intellectual property is contained in, distributed with, or obtainable
-through this project.
+WiiCompiled is GPL-3.0 (see [LICENSE](LICENSE)), and so is this port. See
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). "Nintendo Switch 2" and "Mario Kart Wii" are
+trademarks of Nintendo; this project is not affiliated with or endorsed by Nintendo.
