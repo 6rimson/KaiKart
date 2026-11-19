@@ -1813,7 +1813,9 @@ void ReleaseControllers() noexcept {
 #if defined(HBX_SWITCH2)
 // The desktop menus need a mouse and F10. On the console, L + R + right stick click opens this list
 // instead: D-pad up and down move, left and right change a value, A rebinds or confirms, B closes.
-constexpr std::array<float, 4> kConsoleScales = {1.0f, 1.5f, 2.0f, 3.0f};
+// 4x renders about 2560x2112: for a 1440p or 4K picture docked (3x already fills 1080p). It needs
+// the GPU raised, so a charger.
+constexpr std::array<float, 5> kConsoleScales = {1.0f, 1.5f, 2.0f, 3.0f, 4.0f};
 
 // nn::oe, in the running SDK. These reach system services, which can't read Vulkan-backed memory,
 // so they run on a stack from the SDK heap. A refused request may end the session, so they only
@@ -1999,12 +2001,21 @@ extern "C" int kaihen_clock_choose_mhz(int clock, uint32_t mhz);
 extern "C" uint32_t kaihen_cpu_clock_chosen_mhz(void);
 extern "C" int kaihen_cpu_clock_choose_mhz(uint32_t mhz);
 extern "C" int kaihen_power_plugged(void);
+// The picture's size (kaihen_platform.c): docked lines chosen here, and following a dock change.
+extern "C" uint32_t kaihen_docked_lines(void);
+extern "C" void kaihen_set_docked_lines(uint32_t lines);
+extern "C" int kaihen_display_docked_now(void);
+inline bool kaihen_display_docked() { return kaihen_display_docked_now() != 0; }
+constexpr std::array<uint32_t, 3> kConsoleDockedLines{1080, 1440, 2160};
 // Rates the console runs at (it rounds others to its own steps: 1300 runs 1292.8, 2666 runs 2750).
 // System is 1100.8 MHz for the CPU, 2133 for memory and 561 for the GPU, handheld.
 constexpr std::array<uint32_t, 4> kConsoleCpuSteps{0, 1293, 1498, 1702};
 constexpr std::array<uint32_t, 4> kConsoleMemorySteps{0, 2750, 3200, 3750};
 constexpr std::array<uint32_t, 5> kConsoleGpuSteps{0, 778, 1007, 1262, 1389};
-constexpr int kConsoleOptionRows = 6;
+// The option rows, top to bottom (kConsoleOptionRows counts them).
+enum ConsoleOptionRow : int {
+    kRowResolution, kRowTvOutput, kRowShowFps, kRowVolume, kRowCpu, kRowMemory, kRowGpu, kConsoleOptionRows
+};
 
 // The step after `chosen` towards `change`. Left and right (wrap false) stop at the ends, so a stray
 // push can't jump from the highest setting to the lowest; A (wrap true) goes round.
@@ -2042,7 +2053,9 @@ void ConsoleStepClock(int clock, const std::array<uint32_t, N>& steps, int chang
 
 std::string ConsoleMhzText(uint32_t mhz) { return mhz == 0 ? std::string("System") : std::to_string(mhz) + " MHz"; }
 #else
-constexpr int kConsoleOptionRows = 6;
+enum ConsoleOptionRow : int {
+    kRowResolution, kRowShowFps, kRowVolume, kRowCpu, kRowGxWorker, kRowFrameSkip, kConsoleOptionRows
+};
 #endif
 
 void ConsoleMenuInput(int rows) {
@@ -2121,7 +2134,7 @@ void ConsoleMenuInput(int rows) {
                     g_consoleHoldRow = -1;
                 }
             }
-            if (g_consoleMenuRow == 0 && change != 0) {
+            if (g_consoleMenuRow == kRowResolution && change != 0) {
                 // Stops at 1x and at the highest step: no wrapping round.
                 const int count = static_cast<int>(kConsoleScales.size());
                 const int index = std::clamp(ConsoleScaleIndex() + change, 0, count - 1);
@@ -2130,7 +2143,7 @@ void ConsoleMenuInput(int rows) {
                             static_cast<double>(kConsoleScales[static_cast<size_t>(index)]));
                     SetResolutionScale(kConsoleScales[static_cast<size_t>(index)]);
                 }
-            } else if (g_consoleMenuRow == 1 && (change != 0 || confirm)) {
+            } else if (g_consoleMenuRow == kRowShowFps && (change != 0 || confirm)) {
                 // Left is off, right is on, A switches.
                 const bool show = change < 0 ? false : change > 0 ? true : !g_showFps;
                 if (show != g_showFps) {
@@ -2138,11 +2151,11 @@ void ConsoleMenuInput(int rows) {
                     RuntimeConfigFile::SetShowFps(g_showFps);
                     RT_LOGF("settings", "show FPS %s\n", g_showFps ? "on" : "off");
                 }
-            } else if (g_consoleMenuRow == 2 && change != 0) {
+            } else if (g_consoleMenuRow == kRowVolume && change != 0) {
                 const int before = g_audioVolumePercent;
                 ConsoleChangeVolume(change * 5);
                 if (g_audioVolumePercent != before) RT_LOGF("settings", "volume %d%%\n", g_audioVolumePercent);
-            } else if (g_consoleMenuRow == 3 && (change != 0 || confirm)) {
+            } else if (g_consoleMenuRow == kRowCpu && (change != 0 || confirm)) {
 #if defined(MKW_KAIHEN)
                 // The CPU's own choice is logged by kaihen_cpu_clock_choose_mhz.
                 const uint32_t mhz = kConsoleCpuSteps[static_cast<size_t>(ConsoleStepIndex(
@@ -2153,18 +2166,25 @@ void ConsoleMenuInput(int rows) {
 #endif
 #if defined(MKW_KAIHEN)
             // kaiHEN: no race GX worker or frame skip rows (the worker stays on, frame skip off).
-            } else if ((g_consoleMenuRow == 4 || g_consoleMenuRow == 5) && (change != 0 || confirm)) {
+            } else if ((g_consoleMenuRow == kRowMemory || g_consoleMenuRow == kRowGpu) && (change != 0 || confirm)) {
                 const int step = change != 0 ? change : 1;
-                if (g_consoleMenuRow == 4) {
+                if (g_consoleMenuRow == kRowMemory) {
                     ConsoleStepClock(0, kConsoleMemorySteps, step, change == 0);
                 } else {
                     ConsoleStepClock(1, kConsoleGpuSteps, step, change == 0);
                 }
+            } else if (g_consoleMenuRow == kRowTvOutput && (change != 0 || confirm)) {
+                const uint32_t lines = kConsoleDockedLines[static_cast<size_t>(ConsoleStepIndex(
+                    kConsoleDockedLines, kaihen_docked_lines(), change != 0 ? change : 1, change == 0))];
+                if (lines != kaihen_docked_lines()) {
+                    kaihen_set_docked_lines(lines);
+                    RT_LOGF("settings", "TV output %up\n", static_cast<unsigned>(lines));
+                }
 #else
-            } else if (g_consoleMenuRow == 4 && (change != 0 || confirm)) {
+            } else if (g_consoleMenuRow == kRowGxWorker && (change != 0 || confirm)) {
                 GxWorker::SetRaceDeferring(!GxWorker::RaceDeferring());
                 RT_LOGF("perf", "race GX worker %s\n", GxWorker::RaceDeferring() ? "on" : "off");
-            } else if (g_consoleMenuRow == 5 && (change != 0 || confirm)) {
+            } else if (g_consoleMenuRow == kRowFrameSkip && (change != 0 || confirm)) {
                 SetRetroRewindFrameSkip(!RetroRewindFrameSkip());
                 RT_LOGF("perf", "frame skip %s\n", RetroRewindFrameSkip() ? "on" : "off");
 #endif
@@ -2329,21 +2349,29 @@ void DrawConsoleMenu() {
         };
         char scale[32];
         std::snprintf(scale, sizeof(scale), "%.1fx", static_cast<double>(g_resolutionScale));
-        row(0, std::string("Resolution: ") + scale);
-        row(1, std::string("Show FPS: ") + (g_showFps ? "On" : "Off"));
-        row(2, "Volume: " + std::to_string(g_audioVolumePercent) + "%");
+        row(kRowResolution, std::string("Resolution: ") + scale);
 #if defined(MKW_KAIHEN)
-        row(3, "CPU clock: " + ConsoleMhzText(kaihen_cpu_clock_chosen_mhz()));
-        row(4, "Memory clock: " + ConsoleMhzText(kaihen_clock_chosen_mhz(0)));
-        row(5, "GPU clock: " + ConsoleMhzText(kaihen_clock_chosen_mhz(1)));
+        {
+            // The picture's size on a TV; the handheld screen is always 1080p.
+            const uint32_t lines = kaihen_docked_lines();
+            row(kRowTvOutput, std::string("TV output: ") + (lines >= 2160 ? "4K" : lines >= 1440 ? "1440p" : "1080p") +
+                                  (kaihen_display_docked() ? "" : " (when docked)"));
+        }
+#endif
+        row(kRowShowFps, std::string("Show FPS: ") + (g_showFps ? "On" : "Off"));
+        row(kRowVolume, "Volume: " + std::to_string(g_audioVolumePercent) + "%");
+#if defined(MKW_KAIHEN)
+        row(kRowCpu, "CPU clock: " + ConsoleMhzText(kaihen_cpu_clock_chosen_mhz()));
+        row(kRowMemory, "Memory clock: " + ConsoleMhzText(kaihen_clock_chosen_mhz(0)));
+        row(kRowGpu, "GPU clock: " + ConsoleMhzText(kaihen_clock_chosen_mhz(1)));
         if (kaihen_power_plugged()) {
             ImGui::TextDisabled("  Power: plugged in. Memory and GPU run as chosen.");
         } else {
             ImGui::TextDisabled("  Power: battery. Memory and GPU at System until plugged in.");
         }
 #else
-        row(4, std::string("Race GX worker: ") + (GxWorker::RaceDeferring() ? "On" : "Off"));
-        row(5, std::string("Frame skip (offline): ") + (RetroRewindFrameSkip() ? "On" : "Off"));
+        row(kRowGxWorker, std::string("Race GX worker: ") + (GxWorker::RaceDeferring() ? "On" : "Off"));
+        row(kRowFrameSkip, std::string("Frame skip (offline): ") + (RetroRewindFrameSkip() ? "On" : "Off"));
         ImGui::TextDisabled("  CPU speed: about %.0f MHz", static_cast<double>(g_consoleCpuMhz));
 #endif
         ImGui::Separator();
