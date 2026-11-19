@@ -33,10 +33,10 @@ branch.
 
 **Steps:**
 
-1. Download `KaiKart-<version>.nro` from the
-   [latest release](https://github.com/6rimson/KaiKart/releases/latest) and put it in
-   the microSD card's `switch` folder.
-2. Make a folder named `wiicompiled` at the root of the card, and put your disc image in it.
+1. Download `KaiKart-<version>.zip` from the
+   [latest release](https://github.com/6rimson/KaiKart/releases/latest) and unzip it onto the
+   microSD card's root. It adds `switch/KaiKart.nro` and an empty `wiicompiled` folder.
+2. Put your disc image in the `wiicompiled` folder.
 3. Put the card in the console, start kaiHEN, open hbmenu, and choose **KaiKart**.
 4. Choose **Retro Rewind** or **Mario Kart Wii**.
 
@@ -304,7 +304,7 @@ After a Retro Rewind update that changes its code, replace the `RetroRewind6` fo
 
 `kaihen/run.sh release` builds both games and the launcher with the repository's icons, and
 writes `kaihen/dist/release/` with `KaiKart-<version>.nro`, `RetroRewind-<version>.nro`,
-`WiiCompiled-<version>.nro` and `SHA256SUMS`. The launcher's updates read these names from the
+`WiiCompiled-<version>.nro`, the starter zip `KaiKart-<version>.zip` and `SHA256SUMS`. The launcher's updates read these names from the
 GitHub release.
 
 ### Settings for testing
