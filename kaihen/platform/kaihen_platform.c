@@ -1559,10 +1559,43 @@ int __wrap_fchmod(int fd, mode_t mode) {
     return result;
 }
 
-/* libnx's pthread_detach returns ENOSYS, which std::thread::detach turns into an exception. The
- * runtime detaches only long-lived workers it starts once (video decode, watchdogs), so succeeding
- * is enough: the thread runs on, and its record isn't reclaimed (link: --wrap=pthread_detach). */
+/* libnx's pthread_detach returns ENOSYS, which std::thread::detach turns into an exception
+ * (link: --wrap=pthread_detach). A detached thread also has to be closed once it ends, as
+ * pthread_join does (libnx's join waits, then threadClose and frees the record): otherwise it stays
+ * half-closed, and kaiHEN's hbloader, which tidies those at a return to hbmenu, crashed doing it
+ * after online play (its lookups and connections run on detached threads; 2026-11-18). So each
+ * detached thread is kept here and joined once it has ended, when another thread is detached. A
+ * libnx pthread_t starts with its Thread. */
+enum { kMaxDetached = 256 };
+static Mutex g_detached_lock;
+static pthread_t g_detached[kMaxDetached];
+static int g_detached_count;
+
+static int thread_ended(pthread_t thread) {
+    const Handle handle = ((const Thread *)(const void *)thread)->handle;
+    return R_SUCCEEDED(svcWaitSynchronizationSingle(handle, 0));
+}
+
+/* Under g_detached_lock: joins the detached threads that have ended. How many it joined. */
+static int join_ended_locked(void) {
+    int joined = 0;
+    for (int i = 0; i < g_detached_count;) {
+        if (thread_ended(g_detached[i])) {
+            pthread_join(g_detached[i], NULL);
+            g_detached[i] = g_detached[--g_detached_count];
+            joined++;
+        } else {
+            i++;
+        }
+    }
+    return joined;
+}
+
 int __wrap_pthread_detach(pthread_t thread) {
-    (void)thread;
+    mutexLock(&g_detached_lock);
+    join_ended_locked();
+    if (g_detached_count < kMaxDetached)
+        g_detached[g_detached_count++] = thread;
+    mutexUnlock(&g_detached_lock);
     return 0;
 }
