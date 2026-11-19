@@ -156,16 +156,12 @@ choose and B to close. Everything here is saved.
 | Controls for | Player 1 | Whose buttons the rows below show, with their controller. |
 | Buttons | See [Controls](#controls-and-multiplayer) | Press A on a row, then the new button. Pressing nothing for 10 seconds keeps the old one. Hold A on a row to clear it. |
 | Reset buttons to default | | For the player shown. |
-| Quit to HOME Menu | | Press A twice. Holding **+ and −** together also quits. |
+| Return to hbmenu | | Press A twice. Holding **+ and −** together also returns. From hbmenu you can start KaiKart again. |
 
 Below the clocks, the menu shows whether the console is on a charger.
 
 ## Known issues
 
-- **One game per kaiHEN session.** Starting a second game in the same session crashes, so each
-  game quits to the HOME Menu, which closes the app, instead of returning to hbmenu. To play
-  again, hold R while starting a game to open hbmenu. If a second game is started anyway, it says
-  so and quits instead of crashing.
 - **Raised memory and GPU clocks need a charger.** On battery, the console halves the CPU's real
   speed when memory or the GPU run above their handheld rates. So KaiKart runs them as you chose
   only while plugged in, and at the handheld rates on battery. The CPU keeps its rate either way.

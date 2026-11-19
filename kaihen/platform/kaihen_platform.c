@@ -67,6 +67,11 @@ static Mutex g_ring_lock;
 static int g_log_fd = -1;
 static Thread g_log_thread;
 static volatile int g_log_stop;
+/* KAIHEN_LOG_SYNC=1 in settings.env: each write goes to the card at once, so a crash keeps every
+ * line before it (slower; for finding crashes). g_drain_lock keeps one drain at a time. */
+static volatile int g_log_sync;
+static Mutex g_drain_lock;
+static void log_drain(void);
 
 static ssize_t ring_write(struct _reent *r, void *fd, const char *data, size_t length) {
     (void)r, (void)fd;
@@ -84,6 +89,8 @@ static ssize_t ring_write(struct _reent *r, void *fd, const char *data, size_t l
     g_ring_head += n;
     g_ring_dropped += length - n;
     mutexUnlock(&g_ring_lock);
+    if (g_log_sync)
+        log_drain();
     return (ssize_t)length;
 }
 
@@ -108,6 +115,7 @@ static const devoptab_t g_ring_device = {
 /* Writes what the ring holds to the card. Only the log thread, or the exit once it has stopped. */
 static void log_drain(void) {
     static char chunk[64 << 10];
+    mutexLock(&g_drain_lock);
     for (;;) {
         mutexLock(&g_ring_lock);
         size_t n = g_ring_head - g_ring_tail;
@@ -124,9 +132,10 @@ static void log_drain(void) {
         g_ring_tail += n;
         mutexUnlock(&g_ring_lock);
         if (n == 0)
-            return;
+            break;
         write(g_log_fd, chunk, n);
     }
+    mutexUnlock(&g_drain_lock);
 }
 
 static void log_thread(void *arg) {
@@ -392,10 +401,13 @@ static void __attribute__((noreturn)) quit_now(const char *why) {
 
 /* --- returning to hbmenu --------------------------------------------------------------------- */
 /* As any homebrew does: return through libnx's exit, and kaiHEN's hbloader (ounce-hbloader) loads
- * hbmenu again. It parks the threads a program leaves running (pauses them for good and gives their
- * stacks back to the heap), so the game's threads are left to it: pausing them here first makes its
- * own pause fail, and then it ends the process. The runtime shuts down graphics, audio and its GX
- * worker first (settings_overlay.cpp ConsoleReturnToLauncher). */
+ * hbmenu again, in this same process; the next game loads at the same addresses. hbloader parks a
+ * thread a program leaves running (pauses it for good) and closes one that ended unclosed, but a
+ * parked thread still waiting there hangs the next launch, and the closing crashed after online
+ * play. So nothing is left to it: the runtime ends graphics, audio and its workers first
+ * (settings_overlay.cpp ConsoleReturnToLauncher), and the detached threads that ended are closed
+ * here (__wrap_pthread_detach). hbloader's report, sdmc:/kaihen/nro-cleanup.txt, then says "clean".
+ * Never pause a thread for good here: hbloader's own pause would fail, and it ends the process. */
 
 static volatile int g_return_requested;
 int kaihen_return_requested(void) { return g_return_requested; }
@@ -405,6 +417,10 @@ int kaihen_return_requested(void) { return g_return_requested; }
 static volatile int g_returning;
 static int g_exit_fd = -1; /* UserData/Logs/exit.txt while returning (step) */
 static void step(const char *name);
+static int list_threads(void);
+static int kaihen_close_ended_threads(int *still_running);
+static void log_resources(const char *when);
+static int g_games_before; /* games that ran before this one in this kaiHEN session */
 static void vulkan_finish(void);
 static Thread g_watchdog;
 
@@ -418,12 +434,29 @@ void kaihen_return_to_hbmenu(void) {
     power_close();
     hbxl_cpu_clock_restore();
     vulkan_finish();
+    int detached_running = 0;
+    const int detached_closed = kaihen_close_ended_threads(&detached_running);
+    fprintf(stderr, "[kaihen] at exit: %d ended detached threads closed, %d still running\n", detached_closed,
+            detached_running);
+    log_resources("exit");
     fprintf(stderr, "[kaihen] returning to hbmenu\n");
     profiler_finish();
     fflush(NULL);
     log_finish();
     g_exit_fd = open(KAIHEN_ROOT "/UserData/Logs/exit.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
     step("log closed");
+    /* A thread still running is paused for good by hbloader, and the next launch loads the same
+     * game at the same addresses: a paused thread waiting on a condition variable or lock there can
+     * take the new game's wake-up and lock, and the game hangs. So the game's workers end before
+     * this (settings_overlay.cpp ConsoleReturnToLauncher), and the detached ones are closed (above).
+     * A thread that only sleeps waits on nothing, and hbloader parks it; if any thread is doing
+     * anything else, it quits to the HOME Menu instead, which ends the process. */
+    if (list_threads() > 0) {
+        step("threads still waiting: quitting to the HOME Menu instead");
+        close(g_exit_fd);
+        g_exit_fd = -1;
+        quit_now("threads still running at the return");
+    }
     __libnx_exit(0); /* services closed (userAppExit too, and the GPU driver's), then back to hbloader */
 }
 
@@ -604,13 +637,13 @@ static void card_setup(void) {
     romfsUnmount("romfs");
 }
 
-static void one_game_per_session(void);
+static void count_session_games(void);
 
 void userAppInit(void) {
     copy_thread_pointer();
     cores_start();
     card_setup();
-    one_game_per_session();
+    count_session_games();
     /* libnx's defaults, with TCP receive buffers that may grow to 1 MiB (from 256 KiB): the
      * first-launch Retro Rewind download (about 1.9 GB) was limited by it on Wi-Fi. */
     SocketInitConfig sockets = *socketGetDefaultInitConfig();
@@ -625,6 +658,10 @@ void userAppInit(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     load_settings();
+    if (g_log_fd >= 0 && getenv("KAIHEN_LOG_SYNC") && strcmp(getenv("KAIHEN_LOG_SYNC"), "1") == 0) {
+        g_log_sync = 1;
+        fprintf(stderr, "[kaihen] log: each line written to the card at once (KAIHEN_LOG_SYNC=1)\n");
+    }
     extra_clocks_set();
     sqlite_setup();
     /* SDL draws nothing itself (aurora presents through Dawn to the NWindow), so its offscreen
@@ -648,6 +685,9 @@ void userAppInit(void) {
         threadStart(&g_watchdog);
     fprintf(stderr, "[kaihen] %s %s started, nxlink %s; game thread on core %d of mask %lx; hold + and - to quit\n",
             KAIHEN_PRODUCT_NAME, KAIHEN_APP_VERSION, g_nxlink >= 0 ? "on" : "off", g_game_core, (unsigned long)g_cores);
+    if (g_games_before)
+        fprintf(stderr, "[kaihen] game %d in this kaiHEN session\n", g_games_before + 1);
+    log_resources("launch");
     profiler_start(g_game_core == 1 ? 0 : 1); /* a core no worker is pinned to */
 }
 
@@ -746,6 +786,104 @@ void hbxl_logf(const char *format, ...) {
     vfprintf(stderr, format, ap);
     va_end(ap);
     fputc('\n', stderr);
+}
+
+/* --- threads at a return to hbmenu ----------------------------------------------------------- */
+/* The process's free thread slots and memory, at launch and on the way back to hbmenu: a run that
+ * leaves threads behind leaves fewer slots for the next launch. */
+static void log_resources(const char *when) {
+    u64 free_threads = 0, total = 0, used = 0;
+    svcGetInfo(&free_threads, InfoType_FreeThreadCount, CUR_PROCESS_HANDLE, 0);
+    svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+    svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+    fprintf(stderr, "[kaihen] %s: %lu free thread slots, memory %lu of %lu MiB used\n", when,
+            (unsigned long)free_threads, (unsigned long)(used >> 20), (unsigned long)(total >> 20));
+}
+
+/* At a return: each thread of the game's that is still running (hbloader will park it), with where
+ * it is (pc, lr), to exit.txt. The image's base is userAppInit's address. Found the way hbloader
+ * finds them: libnx's ThreadVars at the end of each TLS slot. Returns how many are doing anything
+ * but sleep (svcSleepThread): those are the ones a next launch can't live with. */
+static void exit_line(const char *line, int n) {
+    if (g_exit_fd >= 0)
+        write(g_exit_fd, line, (size_t)n);
+}
+
+static int list_threads(void) {
+    char line[320];
+    const u64 own = (u64)armGetTls() & ~(u64)0x1FF;
+    const Handle main_thread = envGetMainThreadHandle();
+    int count = 0, waiting = 0;
+    u64 address = 0;
+    for (;;) {
+        MemoryInfo info = {0};
+        u32 page = 0;
+        if (R_FAILED(svcQueryMemory(&info, &page, address)))
+            break;
+        if (info.type == MemType_ThreadLocal && (info.perm & Perm_R)) {
+            for (u64 slot = info.addr; slot + 0x200 <= info.addr + info.size; slot += 0x200) {
+                if (slot == own)
+                    continue;
+                u32 *vars = (u32 *)(slot + 0x200 - 0x20);
+                Handle handle = vars[1];
+                if (vars[0] != 0x21545624 || handle == INVALID_HANDLE || handle == main_thread)
+                    continue;
+                u64 id = 0;
+                s32 index = -1;
+                if (R_FAILED(svcGetThreadId(&id, handle)) || R_SUCCEEDED(svcWaitSynchronization(&index, &handle, 1, 0)))
+                    continue; /* gone, or ended */
+                u64 pc = 0, lr = 0, x0 = 0, fp = 0;
+                if (R_SUCCEEDED(svcSetThreadActivity(handle, ThreadActivity_Paused))) {
+                    ThreadContext context;
+                    for (int tries = 0; tries < 10; tries++) {
+                        memset(&context, 0, sizeof context);
+                        if (R_SUCCEEDED(svcGetThreadContext3(&context, handle))) {
+                            pc = context.pc.x;
+                            lr = context.lr;
+                            x0 = context.cpu_gprs[0].x;
+                            fp = context.fp;
+                            break;
+                        }
+                        svcSleepThread(100000);
+                    }
+                    svcSetThreadActivity(handle, ThreadActivity_Runnable);
+                }
+                const int sleeping = pc >= (u64)(uintptr_t)svcSleepThread && pc <= (u64)(uintptr_t)svcSleepThread + 8;
+                if (!sleeping)
+                    waiting++;
+                int n = snprintf(line, sizeof line, "[kaihen] exit: thread %lu %s, pc 0x%lx lr 0x%lx x0 0x%lx;",
+                                 (unsigned long)id, sleeping ? "sleeping" : "waiting", (unsigned long)pc,
+                                 (unsigned long)lr, (unsigned long)x0);
+                /* Callers, from the frame-pointer chain (each frame: the caller's fp, then lr). */
+                for (int depth = 0; depth < 6 && fp && !(fp & 7) && n < (int)sizeof line - 24; depth++) {
+                    MemoryInfo frame = {0};
+                    u32 frame_page = 0;
+                    if (R_FAILED(svcQueryMemory(&frame, &frame_page, fp)) || !(frame.perm & Perm_R) ||
+                        fp + 16 > frame.addr + frame.size)
+                        break;
+                    const u64 *record = (const u64 *)(uintptr_t)fp;
+                    n += snprintf(line + n, sizeof line - n, " 0x%lx", (unsigned long)record[1]);
+                    fp = record[0];
+                }
+                if (n < (int)sizeof line - 1)
+                    line[n++] = '\n';
+                exit_line(line, n);
+                count++;
+            }
+        }
+        const u64 next = info.addr + info.size;
+        if (next <= address)
+            break;
+        address = next;
+    }
+    u64 free_threads = 0;
+    svcGetInfo(&free_threads, InfoType_FreeThreadCount, CUR_PROCESS_HANDLE, 0);
+    const int n = snprintf(line, sizeof line,
+                           "[kaihen] exit: %d threads running, %d of them not just sleeping; %lu free thread slots; "
+                           "userAppInit at 0x%lx\n",
+                           count, waiting, (unsigned long)free_threads, (unsigned long)(uintptr_t)userAppInit);
+    exit_line(line, n);
+    return waiting;
 }
 
 /* --- screen and Vulkan -------------------------------------------------------------------- */
@@ -1474,8 +1612,6 @@ void __wrap___cxa_throw(void *object, void *type, void (*destructor)(void *)) {
 /* Every exit ends the process through quit_now: tearing the game down while its GPU and worker
  * threads still run crashes ("the software needed to close"). */
 
-void kaihen_quit(const char *why) { quit_now(why); }
-
 void __wrap_exit(int status) {
     quit_now(status == 0 ? "exit(0)" : status == 1 ? "exit(1)" : "exit(failure)");
 }
@@ -1486,52 +1622,31 @@ void __wrap__exit(int status) {
     quit_now(status == 0 ? "_exit(0)" : status == 1 ? "_exit(1)" : "_exit(failure)");
 }
 
-/* --- one game per kaiHEN session --------------------------------------------------------------- */
-/* Opening a game a second time in one kaiHEN session crashes (its cause is still unknown); closing
- * with HOME and reopening hbmenu starts a new session, in a new process. hbmenu, the KaiKart
- * launcher and the games all run in the same process, so a game notes its process ID and the
- * console's tick in UserData/session.txt; a game (or the launcher) starting later in the same
- * process finds them and says so instead of crashing. The tick tells a new boot apart, where
- * process IDs start over. kaihen_setup.cpp and kaihen/launcher read and write it. */
-int kaihen_session_had_game(int mark) {
+/* --- games in one kaiHEN session --------------------------------------------------------------- */
+/* hbmenu, the KaiKart launcher and the games all run in one process, so a game can follow another
+ * in it (a return to hbmenu). The log says which game of the session this is, for bug reports: a
+ * game notes the process ID, the console's tick and the count in UserData/session.txt. The tick
+ * tells a new boot apart, where process IDs start over. */
+static void count_session_games(void) {
     u64 pid = 0;
     svcGetProcessId(&pid, CUR_PROCESS_HANDLE);
     const u64 now = armGetSystemTick();
     unsigned long long saved_pid = 0, saved_tick = 0;
+    int games = 0;
     FILE *file = fopen(KAIHEN_ROOT "/UserData/session.txt", "r");
-    int same = 0;
     if (file) {
-        same = fscanf(file, "%llu %llu", &saved_pid, &saved_tick) == 2 && saved_pid == pid && saved_tick <= now;
+        if (fscanf(file, "%llu %llu %d", &saved_pid, &saved_tick, &games) < 2 || saved_pid != pid || saved_tick > now)
+            games = 0;
+        else if (games < 1)
+            games = 1; /* written before the count was kept */
         fclose(file);
     }
-    if (mark && !same && (file = fopen(KAIHEN_ROOT "/UserData/session.txt", "w"))) {
-        fprintf(file, "%llu %llu\n", (unsigned long long)pid, (unsigned long long)now);
+    g_games_before = games;
+    if ((file = fopen(KAIHEN_ROOT "/UserData/session.txt", "w"))) {
+        fprintf(file, "%llu %llu %d\n", (unsigned long long)pid,
+                (unsigned long long)(games ? saved_tick : now), games + 1);
         fclose(file);
     }
-    return same;
-}
-
-/* At the very start (the second launch's crash comes as graphics start): on a second game in this
- * session, a message on libnx's text console, then quit to the HOME Menu. */
-static void one_game_per_session(void) {
-    if (!kaihen_session_had_game(1))
-        return;
-    consoleInit(NULL);
-    printf("\n  A game already ran in this kaiHEN session, and starting another one crashes.\n\n"
-           "  Close it with HOME, then hold R while starting a game to open hbmenu again.\n\n\n"
-           "  Press A to quit to the HOME Menu.\n");
-    consoleUpdate(NULL);
-    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
-    PadState pad;
-    padInitializeDefault(&pad);
-    while (appletMainLoop()) {
-        padUpdate(&pad);
-        if (padGetButtonsDown(&pad) & (HidNpadButton_A | HidNpadButton_B | HidNpadButton_Plus))
-            break;
-        svcSleepThread(16 * 1000 * 1000);
-    }
-    consoleExit(NULL);
-    quit_now("a game already ran in this kaiHEN session");
 }
 
 /* The card's file system has no permissions, and libnx's chmod and fchmod return ENOSYS. libstdc++'s
@@ -1564,8 +1679,8 @@ int __wrap_fchmod(int fd, mode_t mode) {
  * pthread_join does (libnx's join waits, then threadClose and frees the record): otherwise it stays
  * half-closed, and kaiHEN's hbloader, which tidies those at a return to hbmenu, crashed doing it
  * after online play (its lookups and connections run on detached threads; 2026-11-18). So each
- * detached thread is kept here and joined once it has ended, when another thread is detached. A
- * libnx pthread_t starts with its Thread. */
+ * detached thread is kept here and joined once it has ended: when another thread is detached, and
+ * at a return (kaihen_close_ended_threads). A libnx pthread_t starts with its Thread. */
 enum { kMaxDetached = 256 };
 static Mutex g_detached_lock;
 static pthread_t g_detached[kMaxDetached];
@@ -1598,4 +1713,20 @@ int __wrap_pthread_detach(pthread_t thread) {
         g_detached[g_detached_count++] = thread;
     mutexUnlock(&g_detached_lock);
     return 0;
+}
+
+/* At a return to hbmenu: the detached threads that have ended, closed; how many still run. A worker
+ * just told to stop may still be on its way out, so this waits up to half a second for them. */
+static int kaihen_close_ended_threads(int *still_running) {
+    int joined = 0;
+    for (int tries = 0; tries < 50; tries++) {
+        mutexLock(&g_detached_lock);
+        joined += join_ended_locked();
+        *still_running = g_detached_count;
+        mutexUnlock(&g_detached_lock);
+        if (*still_running == 0)
+            break;
+        svcSleepThread(10000000ull);
+    }
+    return joined;
 }
