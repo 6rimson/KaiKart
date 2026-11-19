@@ -19,6 +19,7 @@
 #include <dolphin/thp.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -67,6 +68,8 @@ std::mutex g_jobMutex;
 std::condition_variable g_jobReady;
 DecodeJob g_job;
 bool g_jobPending = false;
+bool g_workerStop = false;     // Thp_HLE_StopWorker: the worker ends
+bool g_workerRunning = false;  // until it has
 std::atomic<bool> g_jobBusy{false};
 std::atomic<bool> g_jobDone{false};
 std::atomic<uint32_t> g_jobResult{0};
@@ -77,7 +80,12 @@ void DecodeWorker() {
         DecodeJob job;
         {
             std::unique_lock lock{g_jobMutex};
-            g_jobReady.wait(lock, [] { return g_jobPending; });
+            g_jobReady.wait(lock, [] { return g_jobPending || g_workerStop; });
+            if (g_workerStop) {
+                g_workerRunning = false;
+                g_jobReady.notify_all();
+                return;  // closed at a return (kaihen_platform.c, __wrap_pthread_detach)
+            }
             g_jobPending = false;
             job = g_job;
         }
@@ -97,6 +105,10 @@ bool DecodeOnWorker(const void* file, void* tileY, void* tileU, void* tileV, voi
     std::call_once(started, [] {
         if (hbxl_pin_next_thread != nullptr) {
             hbxl_pin_next_thread(5);
+        }
+        {
+            std::lock_guard lock{g_jobMutex};
+            g_workerRunning = true;
         }
         std::thread(DecodeWorker).detach();
     });
@@ -122,6 +134,21 @@ bool DecodeOnWorker(const void* file, void* tileY, void* tileU, void* tileV, voi
 #endif
 
 } // namespace
+
+#if defined(HBX_SWITCH2)
+// Ends the decode thread (waiting at most a second), for a return to hbmenu: a thread left waiting
+// on g_jobReady would still be a waiter at that address when the game is loaded again in the same
+// process, and would take the next launch's first job (the title screen's movie).
+void Thp_HLE_StopWorker() {
+    std::unique_lock lock{g_jobMutex};
+    if (!g_workerRunning) {
+        return;
+    }
+    g_workerStop = true;
+    g_jobReady.notify_all();
+    g_jobReady.wait_for(lock, std::chrono::seconds(1), [] { return !g_workerRunning; });
+}
+#endif
 
 bool Thp_HLE_ProcessCompletions(CpuContext* cpu) {
 #if defined(HBX_SWITCH2)

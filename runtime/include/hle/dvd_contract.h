@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstddef>
@@ -328,6 +329,8 @@ struct Shared {
     std::vector<File> files;
     Ahead ahead;
     bool workerStarted = false;
+    bool workerStop = false;     // StopWorker: the worker ends
+    bool workerRunning = false;  // until it has
 };
 
 inline Shared& State() {
@@ -384,7 +387,15 @@ inline void Worker() {
     std::FILE* handle = nullptr;
     std::unique_lock<std::mutex> lock(shared.lock);
     for (;;) {
-        shared.changed.wait(lock, [&] { return shared.ahead.state == Ahead::State::Wanted; });
+        shared.changed.wait(lock, [&] { return shared.workerStop || shared.ahead.state == Ahead::State::Wanted; });
+        if (shared.workerStop) {
+            if (handle) {
+                std::fclose(handle);
+            }
+            shared.workerRunning = false;
+            shared.changed.notify_all();
+            return;  // closed at a return (kaihen_platform.c, __wrap_pthread_detach)
+        }
         Ahead& ahead = shared.ahead;
         ahead.state = Ahead::State::Reading;
         const std::string path = ahead.path;
@@ -437,6 +448,7 @@ inline void ReadAhead(const File& file, uint64_t length) {
     ahead.data.clear();
     if (!shared.workerStarted) {
         shared.workerStarted = true;
+        shared.workerRunning = true;
         std::thread(Worker).detach();
     }
     shared.changed.notify_all();
@@ -465,6 +477,20 @@ inline bool TakeAhead(std::unique_lock<std::mutex>& lock, const std::string& pat
     out.assign(begin, begin + length);
     return true;
 }
+// Ends the read-ahead thread (waiting at most a second), for a return to hbmenu: a thread left
+// waiting on `changed` would still be a waiter at that address when the game is loaded again in
+// the same process, and could take the next launch's wake-up and lock.
+inline void StopWorker() {
+    Shared& shared = State();
+    std::unique_lock<std::mutex> lock(shared.lock);
+    if (!shared.workerRunning) {
+        return;
+    }
+    shared.workerStop = true;
+    shared.changed.notify_all();
+    shared.changed.wait_for(lock, std::chrono::seconds(1), [&] { return !shared.workerRunning; });
+}
+
 } // namespace OpenGameFiles
 #endif
 

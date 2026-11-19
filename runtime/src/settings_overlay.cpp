@@ -12,6 +12,8 @@
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "runtime_product.h"
+#include "hle/dvd_contract.h"
+#include "perf_stats.h"
 #include "wiimote_host.h"
 
 #include <imgui.h>
@@ -59,7 +61,12 @@ extern "C" int g_gxFrameCount;
 // directory and is not on this target's include path.
 namespace AxDspHle {
 void SetMixWorkerEnabled(bool enabled);
+void ShutdownMixWorker();
 }
+
+#if defined(HBX_SWITCH2)
+void Thp_HLE_StopWorker();  // runtime/src/hle/thp.cpp: ends the movie decoder
+#endif
 
 namespace settings_overlay {
 namespace {
@@ -1957,6 +1964,14 @@ extern "C" int kaihen_return_requested(void);
     });
     ReleaseControllers();
     GxWorker::Stop();
+    // The workers end too. kaiHEN's hbloader only pauses a thread left running, and the next launch
+    // loads the same game at the same addresses, where a paused thread still waiting on a condition
+    // variable takes the wake-up (and the lock) meant for the new game's thread: it hung at its
+    // first sound (the mix worker) or its first movie (the decoder).
+    AxDspHle::ShutdownMixWorker();
+    DvdReadContract::OpenGameFiles::StopWorker();
+    PerfStats::StopFreezeWatchdog();
+    Thp_HLE_StopWorker();
     // Each launch left open would use up one of the console's few audio outputs.
     AudioBackend::Instance().Shutdown();
     aurora_hbx_release_gpu();

@@ -72,6 +72,7 @@ FrameWindow g_window;
 #if defined(HBX_SWITCH2)
 std::atomic<int64_t> g_lastFrameMs{0};
 std::atomic<float> g_cpuMhzNow{0.0f};
+std::atomic<bool> g_watchdogStop{false}, g_watchdogRunning{false};
 
 int64_t NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
@@ -86,7 +87,13 @@ void FreezeWatchdog() {
     std::array<uint64_t, 512> previous{};
     int reports = 0;
     for (;;) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        for (int tenth = 0; tenth < 10 && !g_watchdogStop.load(std::memory_order_relaxed); ++tenth) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (g_watchdogStop.load(std::memory_order_relaxed)) {
+            g_watchdogRunning.store(false, std::memory_order_release);
+            return;  // closed at a return (kaihen_platform.c, __wrap_pthread_detach)
+        }
         {
             // A short version of MeasureCpuMhz, to catch the clock changing during play.
             constexpr uint64_t kOps = 400000;
@@ -148,6 +155,15 @@ void FreezeWatchdog() {
 
 } // namespace
 
+#if defined(HBX_SWITCH2)
+void StopFreezeWatchdog() noexcept {
+    g_watchdogStop.store(true, std::memory_order_relaxed);
+    for (int waited = 0; waited < 30 && g_watchdogRunning.load(std::memory_order_acquire); ++waited) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+#endif
+
 bool Enabled() noexcept {
     static const bool enabled = [] {
         const char* value = std::getenv("MKW_PERF_STATS");
@@ -187,6 +203,7 @@ void OnFramePresented() noexcept {
 #endif
 #if defined(HBX_SWITCH2)
     if (g_lastFrameMs.exchange(NowMs(), std::memory_order_relaxed) == 0) {
+        g_watchdogRunning.store(true, std::memory_order_relaxed);
         std::thread(FreezeWatchdog).detach();
     }
 #endif

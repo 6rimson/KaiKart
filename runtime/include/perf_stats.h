@@ -16,6 +16,8 @@ bool Enabled() noexcept;
 void LogCoreCalibration(const uint8_t* guestRam, size_t size);
 // Rough CPU clock from a two-cycle integer loop; takes about 40 ms.
 float MeasureCpuMhz();
+// Ends the freeze watchdog thread (within about 1.5 s), for a return to hbmenu.
+void StopFreezeWatchdog() noexcept;
 #endif
 enum class WaitKind { Pacing, Audio, Gx, Other, Count };
 void AddWait(std::chrono::steady_clock::duration wait, WaitKind kind) noexcept;
