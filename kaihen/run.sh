@@ -36,7 +36,7 @@ if [[ "$action" == sd ]]; then
   exec python3 "$HERE/sd.py" "$@"
 fi
 # A release, in kaihen/dist/release/: KaiKart-<version>.nro and both game builds at the same version,
-# the starter zip KaiKart-<version>.zip and SHA256SUMS. The card's template folder goes into the apps
+# the starter zip KaiKart-<version>.zip (with shaders when KAIHEN_SHADER_CACHE is set) and SHA256SUMS. The card's template folder goes into the apps
 # as committed, with the icons in kaihen/icons (never a local icon-*.jpg); both work volumes must
 # already be translated.
 if [[ "$action" == release ]]; then
@@ -60,13 +60,24 @@ if [[ "$action" == release ]]; then
   done
   # The starter zip: unzipped to the card's root, it's switch/KaiKart.nro and the wiicompiled folder
   # for the player's disc image. KaiKart downloads the game builds and Retro Rewind itself.
+  # KAIHEN_SHADER_CACHE: a folder with a played-in dawn_cache.db and pipeline_cache.db (made with
+  # this release's graphics code), which go in as wiicompiled/UserData/Cache so a new player's first
+  # races don't stutter.
+  cache="${KAIHEN_SHADER_CACHE:-}"
+  if [[ -n "$cache" && ! ( -f "$cache/dawn_cache.db" && -f "$cache/pipeline_cache.db" ) ]]; then
+    echo "KAIHEN_SHADER_CACHE=$cache has no dawn_cache.db and pipeline_cache.db" >&2
+    exit 1
+  fi
+  [[ -n "$cache" ]] || echo "== no KAIHEN_SHADER_CACHE: the starter zip goes without shaders"
   python3 -c 'import sys, zipfile
-out, version = sys.argv[1], sys.argv[2]
+out, version, cache = sys.argv[1], sys.argv[2], sys.argv[3]
 with zipfile.ZipFile(f"{out}/KaiKart-{version}.zip", "w", zipfile.ZIP_DEFLATED) as z:
     z.write(f"{out}/KaiKart-{version}.nro", "switch/KaiKart.nro")
     z.writestr("wiicompiled/PUT YOUR DISC IMAGE HERE.txt",
                "Put your own Mario Kart Wii PAL disc image (RMCP01, .iso or .wbfs) in this folder,\n"
-               "then open KaiKart from hbmenu.\n")' "$out" "$version"
+               "then open KaiKart from hbmenu.\n")
+    for name in ("dawn_cache.db", "pipeline_cache.db") if cache else ():
+        z.write(f"{cache}/{name}", f"wiicompiled/UserData/Cache/{name}")' "$out" "$version" "$cache"
   (cd "$out" && shasum -a 256 ./*.nro ./*.zip | sed 's# \./# #' > SHA256SUMS && cat SHA256SUMS)
   exit 0
 fi

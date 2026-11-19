@@ -35,18 +35,23 @@ branch.
 
 1. Download `KaiKart-<version>.zip` from the
    [latest release](https://github.com/6rimson/KaiKart/releases/latest) and unzip it onto the
-   microSD card's root. It adds `switch/KaiKart.nro` and an empty `wiicompiled` folder.
+   microSD card's root. It adds `switch/KaiKart.nro` and a `wiicompiled` folder, with shaders
+   already built so the first races don't stutter.
 2. Put your disc image in the `wiicompiled` folder.
 3. Put the card in the console, start kaiHEN, open hbmenu, and choose **KaiKart**.
 4. Choose **Retro Rewind** or **Mario Kart Wii**.
+
+**Already playing KaiKart?** You don't need the starter zip: use **Check for updates**, or copy only
+`switch/KaiKart.nro`. If you do copy its `wiicompiled` folder onto your card, choose **Merge**, not
+Replace: Replace deletes your existing folder, saves included.
 
 The first start of each game sets it up. It downloads the game build, sets up your disc, and, for
 Retro Rewind, downloads Retro Rewind (about 2 GB). It takes about 10 minutes, mostly for the card.
 Keep the console on and the card in. After that, games start straight away, and you can delete the
 disc image to free space.
 
-The first launch then spends about 15-20 seconds on the title screen setting up its saved shaders.
-Wait there until the shader message is gone before racing.
+Each launch spends about 15-20 seconds on the title screen loading its shaders. Wait there until the
+shader message is gone before racing.
 
 ### Without internet on the console
 
@@ -67,6 +72,8 @@ internet.
 KaiKart uses the `wiicompiled` folder you already have, with your saves and settings. Put
 `KaiKart-<version>.nro` in `switch`, and delete the old `switch/RetroRewind.nro` and
 `switch/WiiCompiled.nro`: they're no longer updated.
+
+Your own shaders come with you, since they're in your `wiicompiled` folder.
 
 ### Your saves
 
@@ -159,8 +166,9 @@ Below the clocks, the menu shows whether the console is on a charger.
 - **Raised memory and GPU clocks need a charger.** On battery, the console halves the CPU's real
   speed when memory or the GPU run above their handheld rates. So KaiKart runs them as you chose
   only while plugged in, and at the handheld rates on battery. The CPU keeps its rate either way.
-- **Each launch spends about 15-20 seconds setting up its saved shaders** on the title screen. New
-  places also stutter the first time while their shaders build. They're saved after that.
+- **Each launch spends about 15-20 seconds loading its shaders** on the title screen. The starter zip
+  includes shaders for the common places; anywhere new still stutters the first time while its
+  shaders build, and they're saved after that.
 - **PAL discs only** (`RMCP01`) for now. US and Japanese discs need their own game builds.
 - **Modified discs don't work.** The game's code is translated from the original disc, so KaiKart
   checks that the disc's code is unchanged. Mods that change files on the disc, such as texture
@@ -304,8 +312,12 @@ After a Retro Rewind update that changes its code, replace the `RetroRewind6` fo
 
 `kaihen/run.sh release` builds both games and the launcher with the repository's icons, and
 writes `kaihen/dist/release/` with `KaiKart-<version>.nro`, `RetroRewind-<version>.nro`,
-`WiiCompiled-<version>.nro`, the starter zip `KaiKart-<version>.zip` and `SHA256SUMS`. The launcher's updates read these names from the
-GitHub release.
+`WiiCompiled-<version>.nro`, the starter zip `KaiKart-<version>.zip` and `SHA256SUMS`. The
+launcher's updates read these names from the GitHub release.
+
+With `KAIHEN_SHADER_CACHE=/path/to/folder` (a `dawn_cache.db` and `pipeline_cache.db` from
+`wiicompiled/UserData/Cache` after playing with this release's build), the starter zip also holds
+them. They're generated from play, not stored in this repository.
 
 ### Settings for testing
 
