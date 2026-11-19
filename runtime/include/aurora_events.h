@@ -180,5 +180,8 @@ inline void EndAuroraFrame() {
 
 // Poll Aurora events and update cached window/framebuffer dimensions.
 inline void UpdateAuroraAndProcessEvents() {
+#if defined(MKW_KAIHEN)
+    settings_overlay::FollowConsoleDisplay();
+#endif
     ProcessAuroraEvents(aurora_update());
 }

@@ -89,6 +89,9 @@
 // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
 extern std::atomic_bool g_auroraFrameActive;
 extern "C" int g_gxFrameCount;
+#if defined(MKW_KAIHEN)
+extern "C" void kaihen_display_size(uint32_t* width, uint32_t* height);
+#endif
 extern "C" const char* DVDResolveHostPathForTest(const char* dvdPath);
 bool OS_HLE_InterruptsEnabled() noexcept;
 
@@ -1416,6 +1419,12 @@ int RuntimeMain(int argc, char** argv) {
         auroraConfig.windowHeight = 480;
         auroraConfig.windowWidth = RuntimeConfigFile::WindowWidth(auroraConfig.windowWidth);
         auroraConfig.windowHeight = RuntimeConfigFile::WindowHeight(auroraConfig.windowHeight);
+#if defined(MKW_KAIHEN)
+        // The game's picture is its window's size, so on the console the window is the screen's
+        // (kaihen_platform.c: 1920x1080 handheld, the docked choice on a TV), not the Wii's 854x480.
+        // A size saved in Config.toml (a desktop window's) doesn't apply.
+        kaihen_display_size(&auroraConfig.windowWidth, &auroraConfig.windowHeight);
+#endif
         auroraConfig.hasWindowPosition = RuntimeConfigFile::WindowPosition(
             auroraConfig.windowPosX, auroraConfig.windowPosY);
         auroraConfig.allowJoystickBackgroundEvents = !g_headless;

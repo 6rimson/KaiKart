@@ -2,12 +2,16 @@
  * shared Switch 2 runtime expects from the system. The game's files are in sdmc:/wiicompiled/
  * (kaihen/sd.py): portable.txt, settings.env, UserData/, disc/ and RetroRewind/.
  *   - startup (userAppInit, before main): sockets, the log, the settings in settings.env, the folder;
- *   - the screen: libnx's default NWindow, which Dawn presents to through VK_NN_vi_surface;
+ *   - the screen: libnx's default NWindow, which Dawn presents to through VK_NN_vi_surface, sized
+ *     to the handheld screen or the TV (the display section, by hbx_switch2_vi_window);
  *   - Vulkan: OunceVK, linked in;
  *   - the CPU, GPU and memory clocks: clkrst, directly (the app may use it on kaiHEN), and the
  *     power state (psm): memory and GPU run raised only on a charger;
  *   - input and audio: SDL's kaiHEN drivers (kaihen/patches/sdl3-kaihen.diff), on libnx's pad and
- *     audout; this file configures the pad at startup. */
+ *     audout; this file configures the pad at startup.
+ * Names: kaihen_* is this layer's own. hbx_* and hbxl_* (and the HBX_SWITCH2 build flag) are the
+ * hooks the runtime and the Dawn and aurora patches call, named in the HBLauncher version of this
+ * port; they keep those names until a rename of its own (to kaihen_*), planned before 1.0. */
 #include <errno.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -746,11 +750,103 @@ void hbxl_logf(const char *format, ...) {
 
 /* --- screen and Vulkan -------------------------------------------------------------------- */
 
+/* The picture's size, as Torchlight Rekindled does it on Switch 2 (GPL-3.0,
+ * github.com/GreenSwampDweller/torchlight-rekindled, src/platform/switch/platform_frame.cpp):
+ * the handheld screen's own 1920x1080, not libnx's 1280x720 default (a Switch 1 size); docked, the
+ * lines chosen in the port menu's "TV output" (1080, 1440 or 2160), never more than the TV takes, since the
+ * console crops a picture larger than the screen rather than scaling it. The game's window (its
+ * picture) follows: main.cpp at start, settings_overlay.cpp when the console docks or undocks. */
+static uint32_t g_docked_lines;     /* KAIHEN_DOCKED_LINES; 0 until read */
+static int g_display_mode = -1;     /* the console's mode the window was last sized for */
+static int g_display_reapply;       /* the docked lines changed: size again */
+static u32 g_display_width, g_display_height;
+
+static void save_setting(const char *key, const char *value);
+
+uint32_t kaihen_docked_lines(void) {
+    if (!g_docked_lines) {
+        const char *lines = getenv("KAIHEN_DOCKED_LINES");
+        const unsigned long n = lines ? strtoul(lines, NULL, 10) : 1080;
+        g_docked_lines = n >= 2160 ? 2160 : n >= 1440 ? 1440 : 1080;
+    }
+    return g_docked_lines;
+}
+
+static int display_docked(void) { return appletGetOperationMode() == AppletOperationMode_Console; }
+
+static void display_wanted(u32 *width, u32 *height) {
+    *width = 1920;
+    *height = 1080;
+    if (!display_docked())
+        return;
+    s32 tv_width = 0, tv_height = 0;
+    if (R_FAILED(appletGetDefaultDisplayResolution(&tv_width, &tv_height)) || tv_width <= 0 || tv_height <= 0)
+        return;
+    const uint32_t lines = kaihen_docked_lines();
+    if (lines >= 2160) {
+        *width = (u32)tv_width;
+        *height = (u32)tv_height;
+    } else if (lines >= 1440 && tv_height >= 1440) {
+        *width = 2560;
+        *height = 1440;
+    }
+}
+
+static void display_apply(u32 width, u32 height) {
+    const Result rc = nwindowSetDimensions(nwindowGetDefault(), width, height);
+    g_display_width = width;
+    g_display_height = height;
+    g_display_mode = (int)appletGetOperationMode();
+    s32 tv_width = 0, tv_height = 0;
+    appletGetDefaultDisplayResolution(&tv_width, &tv_height);
+    fprintf(stderr, "[kaihen] display: %s, picture %ux%u (0x%x), screen %dx%d, docked choice %u lines\n",
+            display_docked() ? "docked" : "handheld", width, height, (unsigned)rc, tv_width, tv_height,
+            (unsigned)kaihen_docked_lines());
+}
+
+/* Docked now, for the port menu's "TV output" row. */
+int kaihen_display_docked_now(void) { return display_docked(); }
+
+/* The picture's size now, for the game's window at start. */
+void kaihen_display_size(uint32_t *width, uint32_t *height) {
+    u32 w, h;
+    display_wanted(&w, &h);
+    *width = w;
+    *height = h;
+}
+
+/* Once a frame, from the game's window thread: 1 with the new size when the console docked or
+ * undocked (or the docked lines changed) and the picture's size changes. */
+int kaihen_display_follow(uint32_t *width, uint32_t *height) {
+    if ((int)appletGetOperationMode() == g_display_mode && !g_display_reapply)
+        return 0;
+    g_display_reapply = 0;
+    u32 w, h;
+    display_wanted(&w, &h);
+    if (w == g_display_width && h == g_display_height) {
+        g_display_mode = (int)appletGetOperationMode();
+        return 0;
+    }
+    display_apply(w, h);
+    *width = w;
+    *height = h;
+    return 1;
+}
+
+/* The port menu's "TV output": 1080, 1440 or 2160 lines when docked, saved in settings.env. */
+void kaihen_set_docked_lines(uint32_t lines) {
+    g_docked_lines = lines >= 2160 ? 2160 : lines >= 1440 ? 1440 : 1080;
+    char value[8];
+    snprintf(value, sizeof value, "%u", (unsigned)g_docked_lines);
+    save_setting("KAIHEN_DOCKED_LINES", value);
+    g_display_reapply = 1;
+}
+
 void *hbx_switch2_vi_window(void) {
     NWindow *window = nwindowGetDefault();
-    u32 width = 0, height = 0;
-    nwindowGetDimensions(window, &width, &height);
-    fprintf(stderr, "[kaihen] screen window %ux%u\n", width, height);
+    u32 width, height;
+    display_wanted(&width, &height);
+    display_apply(width, height);
     return window;
 }
 

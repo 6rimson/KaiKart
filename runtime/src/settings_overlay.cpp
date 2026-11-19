@@ -21,6 +21,7 @@
 #include <SDL3/SDL_mouse.h>
 #include <SDL3/SDL_scancode.h>
 #include <SDL3/SDL_timer.h>
+#include <SDL3/SDL_video.h>
 
 #include <array>
 #include <algorithm>
@@ -1675,7 +1676,42 @@ void ApplyInputBlockState() {
 }
 } // namespace
 
+#if defined(MKW_KAIHEN)
+extern "C" int kaihen_display_follow(uint32_t* width, uint32_t* height);
+
+// The menus were made for an 854x480 picture. On the console they're scaled to the picture's height
+// (2.25x at 1080p, 4.5x at 4K): the font built at that size, so it stays crisp, and the spacing
+// scaled from the original style. Before a frame starts: Aurora rebuilds the font atlas then.
+void ScaleMenusForHeight(uint32_t height) {
+    static const ImGuiStyle s_baseStyle = ImGui::GetStyle();
+    static float s_scale = 0.0f;
+    const float scale = static_cast<float>(height) / 480.0f;
+    if (height == 0 || std::fabs(scale - s_scale) < 0.01f) return;
+    s_scale = scale;
+    ImGuiStyle& style = ImGui::GetStyle();
+    style = s_baseStyle;
+    style.ScaleAllSizes(scale);
+    ImGuiIO& io = ImGui::GetIO();
+    io.Fonts->Clear();
+    ImFontConfig font;
+    font.SizePixels = 13.0f * scale;
+    io.Fonts->AddFontDefault(&font);
+}
+
+void FollowConsoleDisplay() noexcept {
+    uint32_t width = 0, height = 0;
+    if (!kaihen_display_follow(&width, &height)) return;
+    // Aurora resizes its picture on the window's resize event, in this frame's events.
+    if (SDL_Window* window = aurora_get_window()) SDL_SetWindowSize(window, static_cast<int>(width), static_cast<int>(height));
+    ScaleMenusForHeight(height);
+    RT_LOGF("perf", "picture now %ux%u\n", static_cast<unsigned>(width), static_cast<unsigned>(height));
+}
+#endif
+
 void InitializeRuntimeSettings() noexcept {
+#if defined(MKW_KAIHEN)
+    ScaleMenusForHeight(aurora_get_window_size().native_fb_height);
+#endif
     PAD_HLE_SetRumbleEnabled(g_rumbleEnabled);
     InputBindings::Reload();
     controller_mapping_wizard::LoadPersistedMappings();

@@ -345,6 +345,8 @@ Much of KaiKart was developed with the assistance of AI coding tools, including 
   (`kaihen/shared/wii_disc_extractor.cpp`, GPLv3), and its Switch 1 port's fixes and ideas.
 - **[KartPadNX](https://github.com/KawaiiBunga/KartPadNX)** by KawaiiBunga: a Switch 1 port whose
   ideas (such as PGO) helped throughout.
+- **[Torchlight Rekindled](https://github.com/GreenSwampDweller/torchlight-rekindled)** by
+  GreenSwampDweller: how to size the picture for the Switch 2's screen and a TV, docked up to 4K.
 - **RavensClawX's [Twilight Princess](https://github.com/ravensclawx/TwilightPrincess-HBLauncher)
   port**: parts of the Dawn and aurora patches, and the layout of the SDL drivers (MIT,
   `kaihen/patches/LICENSE.tp-integration`).

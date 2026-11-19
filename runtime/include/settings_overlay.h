@@ -14,4 +14,9 @@ void NotifyStrapInputAccepted() noexcept;
 void AdvancePresentedFrame() noexcept;
 // Put host controllers back to a neutral state before the process ends.
 void ReleaseControllers() noexcept;
+#if defined(MKW_KAIHEN)
+// Once a frame, before Aurora's events: the game's window follows the console's screen when it
+// docks or undocks, and the menus scale with it.
+void FollowConsoleDisplay() noexcept;
+#endif
 } // namespace settings_overlay
