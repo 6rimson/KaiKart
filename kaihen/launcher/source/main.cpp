@@ -354,10 +354,12 @@ u64 WaitButtons(PadState& pad, u64 wanted) {
 }
 
 // "Check for updates": a newer release on GitHub replaces this launcher and the games on the card,
-// then the launcher starts again. True when it's restarting.
+// then the launcher starts again. True when it's restarting. Without one, a Retro Rewind update that
+// keeps its code (new tracks or other files only) can be installed here.
 bool CheckForUpdates(PadState& pad) {
     kaikart::Release release;
-    std::string error, retro_rewind;
+    kaikart::RetroRewindNews news;
+    std::string error;
     bool asked = false;
     RunStep("Updates", "", pad, [&](kaikart::Progress& p) {
         {
@@ -365,7 +367,14 @@ bool CheckForUpdates(PadState& pad) {
             p.step = "Checking for updates...";
         }
         asked = kaikart::NewerRelease(KAIHEN_UPDATE_REPO, "KaiKart", KAIKART_VERSION, release, error);
-        if (asked && release.version.empty() && KAIHEN_RR_VERSION[0]) retro_rewind = kaikart::LatestRetroRewindVersion();
+        // Only for a Retro Rewind this KaiKart plays; otherwise pressing it sets it up anyway.
+        if (asked && release.version.empty() && KAIHEN_RR_VERSION[0] &&
+            kaikart::RetroRewindReady(kRetroRewind, KAIHEN_RR_CODE_SHA256)) {
+            std::string rr_error;
+            if (!kaikart::RetroRewindUpdates(kRetroRewind, news, rr_error)) {
+                Log("[kaikart] Retro Rewind update check: %s\n", rr_error.c_str());
+            }
+        }
         return true;
     });
     if (!asked) {
@@ -377,10 +386,27 @@ bool CheckForUpdates(PadState& pad) {
     }
     if (release.version.empty()) {
         std::string text = "KaiKart " KAIKART_VERSION " is up to date.";
-        // Retro Rewind ahead of every KaiKart release: its new code needs a new KaiKart first.
-        if (!retro_rewind.empty() && kaikart::VersionNewer(retro_rewind, KAIHEN_RR_VERSION)) {
-            text += "\n\nRetro Rewind " + retro_rewind + " is out. It needs a KaiKart update, which isn't out yet; "
-                    "until then Retro Rewind " KAIHEN_RR_VERSION " keeps working.";
+        const std::string card = kaikart::RetroRewindVersionOnCard(kRetroRewind);
+        // Retro Rewind's new code needs a new KaiKart first; until then the card's version keeps working.
+        const std::string later = news.needs_kaikart.empty() ? "" : news.newest;
+        if (!news.installable.empty()) {
+            text += "\n\nRetro Rewind " + news.installable + " is available. You have " + card + ".";
+            if (!later.empty()) text += " Retro Rewind " + later + " will need a KaiKart update, which isn't out yet.";
+            DrawPage("Updates", text, kWhite, {{"A", "Download and install"}, {"B", "Back"}});
+            if (!(WaitButtons(pad, HidNpadButton_A | HidNpadButton_B) & HidNpadButton_A)) {
+                Log("[kaikart] Retro Rewind %s skipped\n", news.installable.c_str());
+                return false;
+            }
+            Log("[kaikart] updating Retro Rewind from %s to %s\n", card.c_str(), news.installable.c_str());
+            const std::string title = "Updating Retro Rewind to " + news.installable;
+            RunStep(title.c_str(), kDownloadNote, pad, [&](kaikart::Progress& p) {
+                return kaikart::InstallRetroRewindUpdate(kRetroRewind, news.installable, KAIHEN_RR_CODE_SHA256, p);
+            });
+            return false;
+        }
+        if (!later.empty()) {
+            text += "\n\nRetro Rewind " + later + " is out. It needs a KaiKart update, which isn't out yet; "
+                    "until then Retro Rewind " + card + " keeps working.";
         }
         DrawPage("Updates", text, kWhite, {{"B", "Back"}});
         WaitButtons(pad, HidNpadButton_B);
@@ -472,8 +498,10 @@ void RefreshStatus() {
         if (game.retro_rewind && !retro_rewind) needs.push_back(Exists(kRetroRewind) ? "a Retro Rewind update" : "Retro Rewind");
         g_ready[i] = needs.empty();
         if (g_ready[i]) {
-            g_status[i] = game.retro_rewind && KAIHEN_RR_VERSION[0] ? "Ready to play · Retro Rewind " KAIHEN_RR_VERSION
-                                                                   : "Ready to play";
+            // The card's version: it can be newer than the one this KaiKart was made for.
+            const std::string version = KAIHEN_RR_VERSION[0] ? kaikart::RetroRewindVersionOnCard(kRetroRewind) : "";
+            g_status[i] = game.retro_rewind && !version.empty() ? "Ready to play · Retro Rewind " + version
+                                                                : "Ready to play";
         } else {
             std::string list;
             for (size_t n = 0; n < needs.size(); n++) {
@@ -542,6 +570,7 @@ int main(int argc, char** argv) {
                     restarting = true;
                     break;
                 }
+                RefreshStatus();  // a Retro Rewind update shows its new version
             } else {
                 starting = Prepare(kGames[selected], pad, message);
                 if (!starting) RefreshStatus();

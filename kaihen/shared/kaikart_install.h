@@ -44,8 +44,19 @@ struct Release {
     std::string download_base;  // https://github.com/<repo>/releases/download/<tag>
 };
 bool VersionNewer(const std::string& a, const std::string& b);
-// Retro Rewind's newest release on its server, or empty when it can't be asked.
-std::string LatestRetroRewindVersion();
+// The Retro Rewind version in a folder (its version.txt), or empty.
+std::string RetroRewindVersionOnCard(const fs::path& folder);
+// Retro Rewind releases newer than the folder's, from its server: `installable` is the newest that
+// only changes files this app can use as they are (its Code.pul stays the same); `needs_kaikart` the
+// first that changes Code.pul, which only a KaiKart release can play. Both empty when it's current.
+struct RetroRewindNews {
+    std::string installable, needs_kaikart, newest;
+};
+bool RetroRewindUpdates(const fs::path& folder, RetroRewindNews& news, std::string& error);
+// Installs `version` (one RetroRewindUpdates found installable) with Retro Rewind's update files;
+// `code_sha256` is the Code.pul it must still have.
+bool InstallRetroRewindUpdate(const fs::path& folder, const std::string& version, const std::string& code_sha256,
+                              Progress& progress);
 // The display version in an .nro's NACP (what hbmenu shows), or empty.
 std::string NroVersion(const fs::path& nro);
 // The newest release of `repo` with a `name`-<version>.nro newer than `current`; found.version stays

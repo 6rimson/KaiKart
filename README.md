@@ -96,8 +96,11 @@ and offers to download it: first the new game builds, then the launcher itself.
 
 **Retro Rewind updates** come in two kinds:
 
+- **Updates that only add or change tracks and other files** can be installed straight away. When
+  there's no new KaiKart, "Check for updates" offers them: press A to install, or B to skip until
+  next time.
 - **Updates that change Retro Rewind's code** need a new KaiKart release, because the game's code
-  is translated ahead of time. Until there is one, KaiKart keeps playing the version it supports,
+  is translated ahead of time. Until there is one, KaiKart keeps playing the version you have,
   and "Check for updates" says a newer Retro Rewind is out.
 - **Each KaiKart release** installs the Retro Rewind version it supports the next time you start
   Retro Rewind, with Retro Rewind's own small update files when it can. Files you added to the

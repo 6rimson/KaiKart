@@ -598,6 +598,26 @@ std::vector<std::vector<std::string>> Lines(const std::string& text) {
     return lines;
 }
 
+// An update zip's address from Retro Rewind's version list: the list still names an old address for
+// some, swapped the way Wheel Wizard does. Empty when it isn't https.
+std::string UpdateZipUrl(std::string url) {
+    const std::string legacy = "http://update.rwfc.net:8000/";
+    if (url.compare(0, legacy.size(), legacy) == 0) url = "https://update.rwfc.net/" + url.substr(legacy.size());
+    return url.compare(0, 8, "https://") == 0 ? url : std::string();
+}
+
+// The CRC-32 of a file on the card, as a zip's directory lists it; 0 when it can't be read.
+uint32_t FileCrc32(const fs::path& path) {
+    FILE* file = std::fopen(path.c_str(), "rb");
+    if (!file) return 0;
+    std::vector<uint8_t> buffer(1 << 16);
+    uLong crc = crc32(0, nullptr, 0);
+    size_t n;
+    while ((n = std::fread(buffer.data(), 1, buffer.size(), file)) > 0) crc = crc32(crc, buffer.data(), uInt(n));
+    std::fclose(file);
+    return uint32_t(crc);
+}
+
 // True when the folder is now the app's release (Code.pul checked); false leaves it to the full
 // download, which replaces the folder anyway.
 bool UpdateRetroRewind(const fs::path& folder) {
@@ -623,12 +643,8 @@ bool UpdateRetroRewind(const fs::path& folder) {
         return false;
     }
     for (auto& zip : zips) {
-        // The list still names an old address for some; Wheel Wizard swaps it the same way.
-        const std::string legacy = "http://update.rwfc.net:8000/";
-        if (zip.second.compare(0, legacy.size(), legacy) == 0) {
-            zip.second = "https://update.rwfc.net/" + zip.second.substr(legacy.size());
-        }
-        if (zip.second.compare(0, 8, "https://") != 0) return false;
+        zip.second = UpdateZipUrl(zip.second);
+        if (zip.second.empty()) return false;
     }
     // The removals, inside the folder that holds RetroRewind6 only.
     const fs::path root = folder.parent_path();
@@ -684,15 +700,59 @@ bool UpdateRetroRewind(const fs::path& folder) {
 
 bool VersionNewer(const std::string& a, const std::string& b) { return VersionParts(a) > VersionParts(b); }
 
-std::string LatestRetroRewindVersion() {
-    std::string versions, error, newest;
-    if (!FetchString(kVersionList, versions, error)) return {};
+std::string RetroRewindVersionOnCard(const fs::path& folder) { return CardRetroRewindVersion(folder); }
+
+bool RetroRewindUpdates(const fs::path& folder, RetroRewindNews& news, std::string& error) {
+    news = {};
+    const std::string from = CardRetroRewindVersion(folder);
+    const auto from_parts = VersionParts(from);
+    if (from_parts.empty()) return true;  // not set up yet: its first start installs it
+    std::string versions;
+    if (!FetchString(kVersionList, versions, error)) return false;
+    std::vector<std::pair<std::vector<int>, std::string>> zips;  // version, address
     for (const auto& line : Lines(versions)) {
-        if (!VersionParts(line[0]).empty() && (newest.empty() || VersionParts(line[0]) > VersionParts(newest))) {
-            newest = line[0];
-        }
+        if (line.size() < 2) continue;
+        const auto parts = VersionParts(line[0]);
+        if (parts > from_parts) zips.push_back({parts, line[0] + " " + line[1]});
     }
-    return newest;
+    std::sort(zips.begin(), zips.end());
+    // In order: each update that leaves Code.pul as it is can be installed; the first that changes
+    // it needs a KaiKart release, and so does everything after it.
+    const uint32_t code_crc = FileCrc32(folder / "Binaries" / "Code.pul");
+    for (const auto& zip : zips) {
+        const std::string version = zip.second.substr(0, zip.second.find(' '));
+        const std::string url = UpdateZipUrl(zip.second.substr(zip.second.find(' ') + 1));
+        std::vector<ZipEntry> entries;
+        uint64_t run_end = 0;
+        if (url.empty() || !ReadZipDirectory(url, entries, run_end, error)) {
+            news.needs_kaikart = version;  // can't tell: treated as needing a KaiKart release
+            break;
+        }
+        bool new_code = false;
+        for (const auto& entry : entries) new_code |= entry.name == "Binaries/Code.pul" && entry.crc != code_crc;
+        if (new_code) {
+            news.needs_kaikart = version;
+            break;
+        }
+        news.installable = version;
+    }
+    // The newest release, for the message when even the first update needs KaiKart.
+    if (!zips.empty()) news.newest = zips.back().second.substr(0, zips.back().second.find(' '));
+    Log("Retro Rewind on the card %s, installable %s, needs KaiKart %s, newest %s\n", from.c_str(),
+        news.installable.empty() ? "-" : news.installable.c_str(),
+        news.needs_kaikart.empty() ? "-" : news.needs_kaikart.c_str(), news.newest.empty() ? "-" : news.newest.c_str());
+    return true;
+}
+
+bool InstallRetroRewindUpdate(const fs::path& folder, const std::string& version, const std::string& code_sha256,
+                              Progress& progress) {
+    g_progress = &progress;
+    g_rr_version = version;
+    g_rr_sha256 = code_sha256;
+    if (UpdateRetroRewind(folder)) return true;
+    Fail("Retro Rewind " + version + " didn't install.", "Please check the internet connection, then try again. "
+         "Retro Rewind " + CardRetroRewindVersion(folder) + " keeps working until then.");
+    return false;
 }
 
 std::string NroVersion(const fs::path& nro) {
