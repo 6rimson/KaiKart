@@ -16,6 +16,7 @@ extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 #include "runtime_product.h"
 #include "runtime_stall.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -27,6 +28,7 @@ extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 #include <unordered_set>
 #include <filesystem>
 #include <iostream>
+#include <iterator>
 #include <fstream>
 #include <mutex>
 #include <sstream>
@@ -115,6 +117,45 @@ static void CopyToGuestAsDma(uint32_t dest, const uint8_t* data, size_t size) {
 // Host path strings only ever leave this module as UTF-8 display text.
 static std::string HostPathText(const fs::path& path) {
     return RuntimeConfigFile::PathToUtf8(path);
+}
+
+// Each race's track in the log, so the perf reports can be matched to it: the first read of a
+// course file (a Retro Rewind Tracks/ file or the disc's Race/Course/), with the game mode from
+// RaceConfig's menu scenario. Its course slot isn't logged: it can still be the last race's then.
+static void LogTrackLoad(const fs::path& path, uint32_t offset) {
+    if (offset != 0) {
+        return;
+    }
+    const std::string text = HostPathText(path);
+    if (!text.ends_with(".szs") ||
+        (text.find("/Tracks/") == std::string::npos && text.find("/Race/Course/") == std::string::npos)) {
+        return;
+    }
+    static std::mutex lock;
+    static std::string last;
+    static auto lastAt = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        if (text == last && now - lastAt < std::chrono::seconds(10)) {
+            return;
+        }
+        last = text;
+        lastAt = now;
+    }
+    static constexpr const char* kModes[] = {"Grand Prix", "VS",           "Time Trial",     "Battle",
+                                             "Mission",    "Ghost race",   "unknown",        "online private VS",
+                                             "online VS",  "online battle", "online private battle", "awards",
+                                             "credits"};
+    constexpr uint32_t kMenuSettings = 0xC10 + 0xB48; // RaceConfig menu scenario's Settings
+    const uint32_t raceConfig = Memory::Read32(MKW_GADDR(809BD728));
+    uint32_t mode = ~0u;
+    if (raceConfig != 0 && Memory::Contains(raceConfig + kMenuSettings + 8, 4)) {
+        mode = Memory::Read32(raceConfig + kMenuSettings + 8);
+    }
+    const size_t slash = text.find_last_of('/');
+    std::fprintf(stderr, "[race] track %s (%s)\n", slash == std::string::npos ? text.c_str() : text.c_str() + slash + 1,
+                 mode < std::size(kModes) ? kModes[mode] : "mode unknown");
 }
 
 static bool IsDvdDataRoot(const fs::path& path) {
@@ -1116,6 +1157,7 @@ extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr
                             "DVD read destination is outside guest memory");
     }
 
+    LogTrackLoad(entry.hostPath, uOffset);
     RuntimeStall::Timer dvdReadTimer("dvd read", HostPathText(entry.hostPath), RuntimeStall::Io::Dvd, uLength);
     std::vector<uint8_t> tempBuf;
     DvdReadContract::HostReadFailure failure;
@@ -1184,6 +1226,7 @@ extern "C" int32_t DVD__ReadAbsAsyncPrio_HLE_801628cc(uint32_t cmdBlockPtr,
                                      readInfo.fileOffset, requestedLength,
                                      "DVD read destination is outside guest memory");
         } else {
+            LogTrackLoad(readInfo.entry->hostPath, readInfo.fileOffset);
             RuntimeStall::Timer dvdReadTimer("dvd read", HostPathText(readInfo.entry->hostPath),
                                              RuntimeStall::Io::Dvd, readInfo.readLength);
             std::vector<uint8_t> tempBuf;
@@ -1317,6 +1360,7 @@ extern "C" int32_t DVDLowRead_80166330(uint32_t buffer, uint32_t length, uint32_
         return finish(false);
     }
 
+    LogTrackLoad(readInfo.entry->hostPath, readInfo.fileOffset);
     RuntimeStall::Timer dvdReadTimer("dvd read", HostPathText(readInfo.entry->hostPath),
                                      RuntimeStall::Io::Dvd, readInfo.readLength);
     std::vector<uint8_t> tempBuf;
