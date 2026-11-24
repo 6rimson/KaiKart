@@ -1327,6 +1327,44 @@ static void power_log(void) {
     }
 }
 
+static int hz_differ(uint32_t a, uint32_t b) { return (a > b ? a - b : b - a) > 2000000u; }
+
+/* The system puts the clocks back to its own rates by itself, for example after sleep or the HOME
+ * Menu: on 2026-11-23 the CPU read 1100.8 MHz for the rest of a session after a visit to the
+ * album. Unlike the battery halving, clkrst then reads the lower rate, so this puts back the rates
+ * this app set whenever a reading differs from them. Only clocks set to a chosen rate: at the
+ * system's own rate, the system decides. Call with g_clock_lock held, after the rates were read. */
+static int g_put_back_logged;
+
+static void clocks_put_back(void) {
+    for (int i = 0; i < kExtraClocks; i++) {
+        ExtraClock *c = &g_extra[i];
+        if (c->open <= 0 || !c->chosen_mhz || !c->applied_hz || !c->now_hz || !hz_differ(c->now_hz, c->applied_hz))
+            continue;
+        if (g_put_back_logged < 20) {
+            g_put_back_logged++;
+            fprintf(stderr, "[kaihen] %s clock reads %.1f MHz, set to %.1f MHz: setting it again\n", c->name,
+                    c->now_hz / 1e6, c->applied_hz / 1e6);
+        }
+        c->applied_hz = 0;
+        extra_update(c);
+    }
+    if (g_clock_ready <= 0 || !g_raised || !g_cpu_now_hz)
+        return;
+    const uint32_t want = cpu_rate(g_cpu_chosen_mhz);
+    if (!hz_differ(g_cpu_now_hz, want))
+        return;
+    const Result rc = clkrstSetClockRate(&g_cpu, want);
+    uint32_t now = 0;
+    clkrstGetClockRate(&g_cpu, &now);
+    if (g_put_back_logged < 20) {
+        g_put_back_logged++;
+        fprintf(stderr, "[kaihen] CPU clock read %.1f MHz, set to %.1f MHz: set it again (rc 0x%x), reads %.1f MHz\n",
+                g_cpu_now_hz / 1e6, want / 1e6, (unsigned)rc, now / 1e6);
+    }
+    g_cpu_now_hz = now;
+}
+
 /* Once a second, from the watchdog: the power state, and each clock's rate for the menu. */
 static void power_check(void) {
     const int plugged = power_plugged();
@@ -1342,6 +1380,7 @@ static void power_check(void) {
             clkrstGetClockRate(&g_extra[i].session, &g_extra[i].now_hz);
     if (g_clock_ready > 0)
         clkrstGetClockRate(&g_cpu, &g_cpu_now_hz);
+    clocks_put_back();
     power_log();
     mutexUnlock(&g_clock_lock);
 }
