@@ -134,9 +134,10 @@ stands in for one. The port menu uses the GameCube names too, so they're in the 
 A single Joy-Con has no spare buttons for X and Y, so it looks back with Z. Each player can change
 their buttons in the [port menu](#the-port-menu).
 
-**Split screen and frame rate:** for races with two or more players, set the frame rate to 30 FPS
-in Retro Rewind's settings. At 60 FPS, split screen asks more than the console has and runs at
-about 30-38 FPS, unevenly.
+**Split screen and frame rate:** two players run at 60 FPS on most tracks. Some heavy tracks, many
+of them from the Wii U and the Switch, drop below 60 with two or more players. For steady races
+there, set the frame rate to 30 FPS in Retro Rewind's settings, or on a TV lower the resolution.
+Three and four players haven't been measured on this port yet.
 
 ## The port menu
 
