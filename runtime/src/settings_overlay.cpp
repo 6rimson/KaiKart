@@ -1727,8 +1727,8 @@ void ApplyInputBlockState() {
 extern "C" int kaihen_display_follow(uint32_t* width, uint32_t* height);
 
 // The menus were made for an 854x480 picture. On the console they're scaled to the picture's height
-// (2.25x at 1080p, 4.5x at 4K): the font built at that size, so it stays crisp, and the spacing
-// scaled from the original style. Before a frame starts: Aurora rebuilds the font atlas then.
+// (2.25x at 1080p, 4.5x at 4K): the font built at the 4K size and scaled down from it, so it stays
+// crisp, and the spacing scaled from the original style.
 void ScaleMenusForHeight(uint32_t height) {
     static const ImGuiStyle s_baseStyle = ImGui::GetStyle();
     static float s_scale = 0.0f;
@@ -1738,11 +1738,20 @@ void ScaleMenusForHeight(uint32_t height) {
     ImGuiStyle& style = ImGui::GetStyle();
     style = s_baseStyle;
     style.ScaleAllSizes(scale);
+    // The font atlas is built once, at the start, for the tallest picture (a 4K TV), and only scaled
+    // after that: ImGui 1.91 can't rebuild it while the game runs, since the renderer keeps the old
+    // atlas's texture, and rebuilding it at a dock change crashed the game (2026-11-26).
+    constexpr float kFontLines = 2160.0f;
+    static bool s_fontBuilt = false;
     ImGuiIO& io = ImGui::GetIO();
-    io.Fonts->Clear();
-    ImFontConfig font;
-    font.SizePixels = 13.0f * scale;
-    io.Fonts->AddFontDefault(&font);
+    if (!s_fontBuilt) {
+        s_fontBuilt = true;
+        io.Fonts->Clear();
+        ImFontConfig font;
+        font.SizePixels = 13.0f * kFontLines / 480.0f;
+        io.Fonts->AddFontDefault(&font);
+    }
+    io.FontGlobalScale = static_cast<float>(height) / kFontLines;
 }
 
 // The Resolution for the console's mode, at the first frame and when it docks or undocks: before the
