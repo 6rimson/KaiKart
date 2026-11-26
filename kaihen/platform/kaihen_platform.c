@@ -989,13 +989,26 @@ void kaihen_display_size(uint32_t *width, uint32_t *height) {
 }
 
 /* Once a frame, from the game's window thread: 1 with the new size when the console docked or
- * undocked (or the docked lines changed) and the picture's size changes. The caller then releases
- * the surface, and the window takes the size when it's made again. */
+ * undocked (or the docked lines changed) and the picture's size changes. The caller then sizes the
+ * window (kaihen_display_resize) a few frames later, once the resolution has changed. */
+static u64 g_display_recheck_until, g_display_next_check;
+
 int kaihen_display_follow(uint32_t *width, uint32_t *height) {
-    if ((int)appletGetOperationMode() == g_display_mode && !g_display_reapply)
-        return 0;
-    if ((int)appletGetOperationMode() != g_display_mode) {
-        fprintf(stderr, "[kaihen] console %s\n", display_docked() ? "docked" : "undocked");
+    const u64 now = armGetSystemTick();
+    if ((int)appletGetOperationMode() == g_display_mode && !g_display_reapply) {
+        /* Just after docking the console still reports the handheld screen's 1920x1080 for the TV,
+         * so a TV picture stayed 1080p (2026-11-26): for 10 seconds after a change, the TV's size is
+         * read again four times a second. */
+        if (now >= g_display_recheck_until || now < g_display_next_check)
+            return 0;
+        g_display_next_check = now + armNsToTicks(250000000ull);
+    } else if ((int)appletGetOperationMode() != g_display_mode) {
+        s32 tv_width = 0, tv_height = 0;
+        appletGetDefaultDisplayResolution(&tv_width, &tv_height);
+        fprintf(stderr, "[kaihen] console %s, screen %dx%d\n", display_docked() ? "docked" : "undocked", tv_width,
+                tv_height);
+        g_display_recheck_until = now + armNsToTicks(10000000000ull);
+        g_display_next_check = now + armNsToTicks(250000000ull);
     }
     g_display_reapply = 0;
     u32 w, h;
@@ -1003,18 +1016,20 @@ int kaihen_display_follow(uint32_t *width, uint32_t *height) {
     g_display_mode = (int)appletGetOperationMode();
     if (w == g_display_width && h == g_display_height)
         return 0;
-    /* The window's size may change only while no buffers are registered with it (libnx), so it
-     * isn't set here: the game releases its surface (settings_overlay.cpp), and the next frame
-     * makes a new one, whose hbx_switch2_vi_window sets the size first. Setting it here, with the
-     * swapchain's 4K buffers still registered, crashed the game at an undock (2026-11-26). */
     g_display_width = w;
     g_display_height = h;
-    fprintf(stderr, "[kaihen] display: %s, picture %ux%u once the surface is made again\n",
-            display_docked() ? "docked" : "handheld", w, h);
+    fprintf(stderr, "[kaihen] display: %s, picture %ux%u next\n", display_docked() ? "docked" : "handheld", w, h);
     *width = w;
     *height = h;
     return 1;
 }
+
+/* The window to the picture's size, while the game runs, as Torchlight Rekindled does at a dock
+ * change: the driver keeps its buffers (libnx's NWindow has none of its own registered, so this
+ * succeeds), and the game's next surface configuration follows with a swapchain made from the old
+ * one. Releasing the surface and making a new one instead crashed the game at undocks
+ * (VK_ERROR_NATIVE_WINDOW_IN_USE_KHR, or with no error at all), 2026-11-26. */
+void kaihen_display_resize(uint32_t width, uint32_t height) { display_apply(width, height); }
 
 /* The port menu's "TV output": 1080, 1440 or 2160 lines when docked, saved in settings.env. */
 void kaihen_set_docked_lines(uint32_t lines) {
