@@ -122,11 +122,20 @@ static std::string HostPathText(const fs::path& path) {
 // Each race's track in the log, so the perf reports can be matched to it: the first read of a
 // course file (a Retro Rewind Tracks/ file or the disc's Race/Course/), with the game mode from
 // RaceConfig's menu scenario. Its course slot isn't logged: it can still be the last race's then.
+//
+// And each start of a music stream (a read of a .brstm file's header), with the time the [frame]
+// lines use: a race's music that starts twice shows as two lines.
 static void LogTrackLoad(const fs::path& path, uint32_t offset) {
     if (offset != 0) {
         return;
     }
     const std::string text = HostPathText(path);
+    if (text.ends_with(".brstm")) {
+        const size_t slash = text.find_last_of('/');
+        std::fprintf(stderr, "[sound] t=%lld music %s\n", RuntimeStall::NowUs() / 1000,
+                     slash == std::string::npos ? text.c_str() : text.c_str() + slash + 1);
+        return;
+    }
     if (!text.ends_with(".szs") ||
         (text.find("/Tracks/") == std::string::npos && text.find("/Race/Course/") == std::string::npos)) {
         return;
