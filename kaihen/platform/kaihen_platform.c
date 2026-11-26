@@ -70,14 +70,15 @@ static volatile int g_log_stop;
 /* KAIHEN_LOG_SYNC=1 in settings.env: each write goes to the card at once, so a crash keeps every
  * line before it (slower; for finding crashes). g_drain_lock keeps one drain at a time. */
 static volatile int g_log_sync;
-/* Until this tick, each write goes to the card at once too: a few seconds after the console docks or
- * undocks, so a crash there keeps its last lines (log_sync_for). */
-static volatile u64 g_log_sync_until;
 static Mutex g_drain_lock;
 static void log_drain(void);
 
-static void log_sync_for(unsigned seconds) {
-    g_log_sync_until = armGetSystemTick() + armNsToTicks((u64)seconds * 1000000000ull);
+/* Writes the log to the card now, for the dock steps (settings_overlay.cpp): a crash in the next step
+ * then keeps every line before it. One write each; writing every line at once instead, for 10 s
+ * after a dock change, stuttered the game for 400-700 ms every 1.5 s (2026-11-26). */
+void kaihen_log_flush(void) {
+    if (g_log_fd >= 0)
+        log_drain();
 }
 
 static ssize_t ring_write(struct _reent *r, void *fd, const char *data, size_t length) {
@@ -96,7 +97,7 @@ static ssize_t ring_write(struct _reent *r, void *fd, const char *data, size_t l
     g_ring_head += n;
     g_ring_dropped += length - n;
     mutexUnlock(&g_ring_lock);
-    if (g_log_sync || (g_log_sync_until && armGetSystemTick() < g_log_sync_until))
+    if (g_log_sync)
         log_drain();
     return (ssize_t)length;
 }
@@ -994,8 +995,6 @@ int kaihen_display_follow(uint32_t *width, uint32_t *height) {
     if ((int)appletGetOperationMode() == g_display_mode && !g_display_reapply)
         return 0;
     if ((int)appletGetOperationMode() != g_display_mode) {
-        /* A crash here (undocking at 4K) lost its last lines to the log's batching. */
-        log_sync_for(10);
         fprintf(stderr, "[kaihen] console %s\n", display_docked() ? "docked" : "undocked");
     }
     g_display_reapply = 0;
