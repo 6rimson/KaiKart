@@ -2116,7 +2116,7 @@ constexpr std::array<uint32_t, 4> kConsoleMemorySteps{0, 2750, 3200, 3750};
 constexpr std::array<uint32_t, 5> kConsoleGpuSteps{0, 778, 1007, 1262, 1389};
 // The option rows, top to bottom (kConsoleOptionRows counts them).
 enum ConsoleOptionRow : int {
-    kRowResolution, kRowTvOutput, kRowShowFps, kRowVolume, kRowCpu, kRowMemory, kRowGpu, kConsoleOptionRows
+    kRowResolution, kRowTvOutput, kRowShowFps, kRowVolume, kRowCpu, kRowGpu, kRowMemory, kConsoleOptionRows
 };
 
 // The step after `chosen` towards `change`. Left and right (wrap false) stop at the ends, so a stray
@@ -2472,8 +2472,8 @@ void DrawConsoleMenu() {
         row(kRowVolume, "Volume: " + std::to_string(g_audioVolumePercent) + "%");
 #if defined(MKW_KAIHEN)
         row(kRowCpu, "CPU clock: " + ConsoleMhzText(kaihen_cpu_clock_chosen_mhz()));
-        row(kRowMemory, "Memory clock: " + ConsoleMhzText(kaihen_clock_chosen_mhz(0)));
         row(kRowGpu, "GPU clock: " + ConsoleMhzText(kaihen_clock_chosen_mhz(1)));
+        row(kRowMemory, "Memory clock: " + ConsoleMhzText(kaihen_clock_chosen_mhz(0)));
         if (kaihen_power_plugged()) {
             ImGui::TextDisabled("  Power: plugged in. Memory and GPU run as chosen.");
         } else {

@@ -152,8 +152,8 @@ choose and B to close. Everything here is saved.
 | Show FPS | Off | |
 | Volume | 100% | |
 | CPU clock | 1702 MHz | The system's own rate is 1100.8 MHz. |
-| Memory clock | System | 2133 MHz handheld. Raised rates apply only on a charger. Heavy tracks at the start of a race, and 4×, run smoother with it raised. |
 | GPU clock | System | 561 MHz handheld. Raised rates apply only on a charger. 4× needs at least 778 MHz. |
+| Memory clock | System | 2133 MHz handheld. Raised rates apply only on a charger. Heavy tracks at the start of a race, and 4×, run smoother with it raised. |
 | Controls for | Player 1 | Whose buttons the rows below show, with their controller. |
 | Buttons | See [Controls](#controls-and-multiplayer) | Press A on a row, then the new button. Pressing nothing for 10 seconds keeps the old one. Hold A on a row to clear it. |
 | Reset buttons to default | | For the player shown. |
