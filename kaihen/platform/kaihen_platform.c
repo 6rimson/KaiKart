@@ -70,8 +70,15 @@ static volatile int g_log_stop;
 /* KAIHEN_LOG_SYNC=1 in settings.env: each write goes to the card at once, so a crash keeps every
  * line before it (slower; for finding crashes). g_drain_lock keeps one drain at a time. */
 static volatile int g_log_sync;
+/* Until this tick, each write goes to the card at once too: a few seconds after the console docks or
+ * undocks, so a crash there keeps its last lines (log_sync_for). */
+static volatile u64 g_log_sync_until;
 static Mutex g_drain_lock;
 static void log_drain(void);
+
+static void log_sync_for(unsigned seconds) {
+    g_log_sync_until = armGetSystemTick() + armNsToTicks((u64)seconds * 1000000000ull);
+}
 
 static ssize_t ring_write(struct _reent *r, void *fd, const char *data, size_t length) {
     (void)r, (void)fd;
@@ -89,7 +96,7 @@ static ssize_t ring_write(struct _reent *r, void *fd, const char *data, size_t l
     g_ring_head += n;
     g_ring_dropped += length - n;
     mutexUnlock(&g_ring_lock);
-    if (g_log_sync)
+    if (g_log_sync || (g_log_sync_until && armGetSystemTick() < g_log_sync_until))
         log_drain();
     return (ssize_t)length;
 }
@@ -147,11 +154,32 @@ static void log_thread(void *arg) {
     }
 }
 
+/* 1 when the log at path ends the way a game that went back to hbmenu or quit ends its log. */
+static int log_ended_cleanly(const char *path) {
+    const int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 1;
+    char tail[512];
+    const off_t size = lseek(fd, 0, SEEK_END);
+    const off_t from = size > (off_t)(sizeof tail - 1) ? size - (off_t)(sizeof tail - 1) : 0;
+    ssize_t n = lseek(fd, from, SEEK_SET) == from ? read(fd, tail, sizeof tail - 1) : -1;
+    close(fd);
+    if (n <= 0)
+        return size <= 0;
+    tail[n] = 0;
+    return strstr(tail, "[kaihen] returning to hbmenu") != NULL || strstr(tail, ": quitting\n") != NULL;
+}
+
 static void log_start(void) {
     /* The previous run's log stays as kaihen.prev.log (only the last one), so a problem survives
-     * the next launch. The card's file system won't rename over a file, so the old one goes first. */
-    remove(KAIHEN_ROOT "/UserData/Logs/kaihen.prev.log");
-    rename(KAIHEN_ROOT "/UserData/Logs/kaihen.log", KAIHEN_ROOT "/UserData/Logs/kaihen.prev.log");
+     * the next launch. A run that didn't end cleanly (a crash, or closed from the HOME Menu) is kept
+     * as kaihen.crash.log instead, until the next such run, so two more launches don't lose it.
+     * The card's file system won't rename over a file, so the old one goes first. */
+    const char *keep = log_ended_cleanly(KAIHEN_ROOT "/UserData/Logs/kaihen.log")
+                           ? KAIHEN_ROOT "/UserData/Logs/kaihen.prev.log"
+                           : KAIHEN_ROOT "/UserData/Logs/kaihen.crash.log";
+    remove(keep);
+    rename(KAIHEN_ROOT "/UserData/Logs/kaihen.log", keep);
     g_log_fd = open(KAIHEN_ROOT "/UserData/Logs/kaihen.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (g_log_fd < 0 || AddDevice(&g_ring_device) < 0)
         return;
@@ -958,6 +986,11 @@ void kaihen_display_size(uint32_t *width, uint32_t *height) {
 int kaihen_display_follow(uint32_t *width, uint32_t *height) {
     if ((int)appletGetOperationMode() == g_display_mode && !g_display_reapply)
         return 0;
+    if ((int)appletGetOperationMode() != g_display_mode) {
+        /* A crash here (undocking at 4K) lost its last lines to the log's batching. */
+        log_sync_for(10);
+        fprintf(stderr, "[kaihen] console %s\n", display_docked() ? "docked" : "undocked");
+    }
     g_display_reapply = 0;
     u32 w, h;
     display_wanted(&w, &h);
