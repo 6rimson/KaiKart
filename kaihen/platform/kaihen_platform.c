@@ -254,7 +254,8 @@ void __libnx_exit(int rc) __attribute__((noreturn));
  * thread for a moment and records the time, its pc and lr, and up to 8 callers from the frame-pointer
  * chain. They go to UserData/Logs/profile.bin at exit: a header {userAppInit's address (subtract the
  * ELF's to get the load address), sample count, words per sample}, then the samples. */
-int kaihen_in_race(void); /* runtime/src/hle/vi.cpp */
+int kaihen_in_race(void);           /* runtime/src/hle/vi.cpp */
+long long kaihen_frame_age_us(void); /* the same: how long since the last frame was presented */
 void userAppInit(void);
 
 static u64 *g_samples;
@@ -262,6 +263,7 @@ static size_t g_sample_count; /* words */
 enum { PROFILE_FRAMES = 8, PROFILE_WORDS = 3 + PROFILE_FRAMES, PROFILE_SAMPLES = 200000 };
 static Thread g_profiler;
 static volatile int g_profiler_stop;
+static int g_profile_loads; /* KAIHEN_PROFILE=load: only frames that take over 200 ms */
 
 static void profiler(void *arg) {
     (void)arg;
@@ -269,7 +271,9 @@ static void profiler(void *arg) {
     const Handle game = envGetMainThreadHandle();
     while (!g_profiler_stop) {
         svcSleepThread(1000000ull);
-        if (!kaihen_in_race() || g_sample_count + PROFILE_WORDS > (size_t)PROFILE_SAMPLES * PROFILE_WORDS)
+        if (g_sample_count + PROFILE_WORDS > (size_t)PROFILE_SAMPLES * PROFILE_WORDS)
+            continue;
+        if (g_profile_loads ? kaihen_frame_age_us() < 200000 : !kaihen_in_race())
             continue;
         if (R_FAILED(svcSetThreadActivity(game, ThreadActivity_Paused)))
             continue;
@@ -303,12 +307,14 @@ static void profiler(void *arg) {
 
 static void profiler_start(int core) {
     const char *on = getenv("KAIHEN_PROFILE");
-    if (!on || strcmp(on, "1") != 0)
+    if (!on || (strcmp(on, "1") != 0 && strcmp(on, "load") != 0))
         return;
+    g_profile_loads = strcmp(on, "load") == 0;
     g_samples = malloc((size_t)PROFILE_SAMPLES * PROFILE_WORDS * sizeof *g_samples);
     if (g_samples && R_SUCCEEDED(threadCreate(&g_profiler, profiler, NULL, NULL, 0x4000, 0x2C, core)))
         threadStart(&g_profiler);
-    fprintf(stderr, "[kaihen] profiling races on core %d (userAppInit at %p)\n", core, (void *)userAppInit);
+    fprintf(stderr, "[kaihen] profiling %s on core %d (userAppInit at %p)\n",
+            g_profile_loads ? "frames over 200 ms" : "races", core, (void *)userAppInit);
 }
 
 static void profiler_finish(void) {

@@ -553,6 +553,14 @@ bool VI_HLE_InRaceSection() {
 }
 
 #if defined(MKW_KAIHEN)
+// The last presented frame's time, for the kaiHEN shim's profiler: KAIHEN_PROFILE=load samples only
+// frames that take long (a race's load).
+static std::atomic<long long> g_kaihenLastPresentUs{0};
+extern "C" long long kaihen_frame_age_us(void) noexcept {
+    const long long last = g_kaihenLastPresentUs.load(std::memory_order_relaxed);
+    return last != 0 ? RuntimeStall::NowUs() - last : 0;
+}
+
 // For the kaiHEN shim's profiler thread (kaihen/platform/kaihen_platform.c), which asks from its own
 // thread from startup on: before the game's memory exists, the read above throws (and logs).
 extern "C" int kaihen_in_race(void) noexcept {
@@ -613,6 +621,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
                          dvdUs / 1000, nandOps, nandBytes / 1024, nandUs / 1000);
         }
         s_lastPresentUs = nowUs;
+#if defined(MKW_KAIHEN)
+        g_kaihenLastPresentUs.store(nowUs, std::memory_order_relaxed);
+#endif
     }
     Clock::time_point paceDeadline{};
     bool paceThisFrame = false;
