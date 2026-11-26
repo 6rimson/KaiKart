@@ -68,6 +68,14 @@ void ShutdownMixWorker();
 void Thp_HLE_StopWorker();  // runtime/src/hle/thp.cpp: ends the movie decoder
 #endif
 
+#if defined(MKW_KAIHEN)
+// Aurora's lib/webgpu/gpu.hpp, which isn't among its public headers: waits for the GPU, then
+// releases the surface and its swapchain. The next frame makes a new one.
+namespace aurora::webgpu {
+void release_surface() noexcept;
+}
+#endif
+
 namespace settings_overlay {
 namespace {
 
@@ -1756,14 +1764,43 @@ void FollowConsoleMode() noexcept {
     ApplyResolutionScale(scale);
 }
 
+// A dock change goes in steps, each on a later frame: the resolution for the mode, then the surface
+// and window, then the menus. Run in one frame, an undock at 4K crashed twice (2026-11-26); in steps
+// it switched both ways. The new surface came only some frames after the old one went.
+struct DockSteps {
+    int frame = -1; // frames since the change; -1 when none is under way
+    uint32_t width = 0, height = 0;
+};
+DockSteps g_dock;
+
 void FollowConsoleDisplay() noexcept {
+    if (g_dock.frame >= 0) {
+        ++g_dock.frame;
+        if (g_dock.frame == 2) {
+            // The console's window may change size only with no buffers registered, so the surface
+            // (and its swapchain) goes first; Aurora makes a new one on the next frame, and
+            // hbx_switch2_vi_window sizes the window before it. The picture follows the window's
+            // resize event, in this frame's events.
+            RT_LOGF("perf", "dock: releasing the surface\n");
+            ::aurora::webgpu::release_surface();
+            RT_LOGF("perf", "dock: surface released; window to %ux%u\n", static_cast<unsigned>(g_dock.width),
+                    static_cast<unsigned>(g_dock.height));
+            if (SDL_Window* window = aurora_get_window())
+                SDL_SetWindowSize(window, static_cast<int>(g_dock.width), static_cast<int>(g_dock.height));
+        } else if (g_dock.frame == 8) {
+            RT_LOGF("perf", "dock: menus for %u lines\n", static_cast<unsigned>(g_dock.height));
+            ScaleMenusForHeight(g_dock.height);
+            RT_LOGF("perf", "dock: picture now %ux%u\n", static_cast<unsigned>(g_dock.width),
+                    static_cast<unsigned>(g_dock.height));
+        } else if (g_dock.frame > 12) {
+            g_dock.frame = -1;
+        }
+        return;
+    }
     FollowConsoleMode();
     uint32_t width = 0, height = 0;
     if (!kaihen_display_follow(&width, &height)) return;
-    // Aurora resizes its picture on the window's resize event, in this frame's events.
-    if (SDL_Window* window = aurora_get_window()) SDL_SetWindowSize(window, static_cast<int>(width), static_cast<int>(height));
-    ScaleMenusForHeight(height);
-    RT_LOGF("perf", "picture now %ux%u\n", static_cast<unsigned>(width), static_cast<unsigned>(height));
+    g_dock = {0, width, height};
 }
 #endif
 

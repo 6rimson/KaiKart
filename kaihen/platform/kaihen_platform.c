@@ -982,7 +982,8 @@ void kaihen_display_size(uint32_t *width, uint32_t *height) {
 }
 
 /* Once a frame, from the game's window thread: 1 with the new size when the console docked or
- * undocked (or the docked lines changed) and the picture's size changes. */
+ * undocked (or the docked lines changed) and the picture's size changes. The caller then releases
+ * the surface, and the window takes the size when it's made again. */
 int kaihen_display_follow(uint32_t *width, uint32_t *height) {
     if ((int)appletGetOperationMode() == g_display_mode && !g_display_reapply)
         return 0;
@@ -994,11 +995,17 @@ int kaihen_display_follow(uint32_t *width, uint32_t *height) {
     g_display_reapply = 0;
     u32 w, h;
     display_wanted(&w, &h);
-    if (w == g_display_width && h == g_display_height) {
-        g_display_mode = (int)appletGetOperationMode();
+    g_display_mode = (int)appletGetOperationMode();
+    if (w == g_display_width && h == g_display_height)
         return 0;
-    }
-    display_apply(w, h);
+    /* The window's size may change only while no buffers are registered with it (libnx), so it
+     * isn't set here: the game releases its surface (settings_overlay.cpp), and the next frame
+     * makes a new one, whose hbx_switch2_vi_window sets the size first. Setting it here, with the
+     * swapchain's 4K buffers still registered, crashed the game at an undock (2026-11-26). */
+    g_display_width = w;
+    g_display_height = h;
+    fprintf(stderr, "[kaihen] display: %s, picture %ux%u once the surface is made again\n",
+            display_docked() ? "docked" : "handheld", w, h);
     *width = w;
     *height = h;
     return 1;
