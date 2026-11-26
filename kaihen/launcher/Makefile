@@ -42,7 +42,7 @@ include $(DEVKITPRO)/libounce/switch2_rules
 TARGET		:=	KaiKart
 APP_TITLE	:=	KaiKart
 APP_AUTHOR	:=	6rimson
-APP_VERSION	:=	0.4.1
+APP_VERSION	:=	0.5.0
 ICON		:=	../icons/KaiKart.jpg
 BUILD		:=	build
 SOURCES		:=	source ../shared

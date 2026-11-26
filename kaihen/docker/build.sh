@@ -111,7 +111,7 @@ sync_tree() {
 # changes): its version and name, the repository its updates come from (KAIHEN_UPDATE_REPO), and the Retro
 # Rewind release it is built for (version and Code.pul's SHA-256), which it downloads from Retro
 # Rewind's server when the card doesn't have it (kaihen_setup.cpp).
-VERSION="${KAIHEN_VERSION:-0.4.1}"
+VERSION="${KAIHEN_VERSION:-0.5.0}"
 build_info() {
   local info="$SRC/kaihen/platform/kaihen_build_info.h" rr=/host/PulsarPacks/completed/RetroRewind/RetroRewind6 text
   local name="Mario Kart Wii"
