@@ -207,11 +207,43 @@ bool IsHighFrameRateMode() {
     return kFrameInterpolationTargetFps[static_cast<size_t>(g_frameInterpolationMode)] > 60;
 }
 
-void SetResolutionScale(float scale) {
+void ApplyResolutionScale(float scale) {
     GX_SYNC_INLINE();
     g_resolutionScale = scale;
     VISetFrameBufferScale(scale);
+}
+
+#if defined(MKW_KAIHEN)
+// The Resolution row keeps one value per mode (kaihen_platform.c): Config.toml's for the handheld
+// screen and settings.env's KAIHEN_TV_RESOLUTION on a TV, applied when the console docks or undocks.
+// Handheld it stops at 3x: the screen is 1080p, and 4x needs a TV's GPU clock.
+extern "C" float kaihen_tv_resolution(void);
+extern "C" void kaihen_set_tv_resolution(float scale);
+extern "C" int kaihen_display_docked_now(void);
+constexpr float kHandheldMaxScale = 3.0f;
+float g_handheldScale = 0.0f; // Config.toml's value; set on the first frame
+
+float ConsoleModeScale(bool docked) {
+    if (docked) {
+        const float tv = kaihen_tv_resolution();
+        return tv > 0.0f ? tv : g_handheldScale;
+    }
+    return std::min(g_handheldScale, kHandheldMaxScale);
+}
+#endif
+
+void SetResolutionScale(float scale) {
+#if defined(MKW_KAIHEN)
+    if (kaihen_display_docked_now()) {
+        kaihen_set_tv_resolution(scale);
+    } else {
+        g_handheldScale = scale;
+        RuntimeConfigFile::SetResolutionMultiplier(scale);
+    }
+#else
     RuntimeConfigFile::SetResolutionMultiplier(scale);
+#endif
+    ApplyResolutionScale(scale);
 }
 
 void LimitResolutionForFrameRate() {
@@ -1705,7 +1737,27 @@ void ScaleMenusForHeight(uint32_t height) {
     io.Fonts->AddFontDefault(&font);
 }
 
+// The Resolution for the console's mode, at the first frame and when it docks or undocks: before the
+// picture changes size, so undocking at 4x drops to the handheld value first.
+void FollowConsoleMode() noexcept {
+    static int s_docked = -1;
+    const int docked = kaihen_display_docked_now() != 0;
+    if (docked == s_docked) return;
+    if (s_docked < 0) {
+        g_handheldScale = g_resolutionScale;
+        // Before there was a TV value, one value served both: it becomes the TV's to start with.
+        if (kaihen_tv_resolution() <= 0.0f) kaihen_set_tv_resolution(g_handheldScale);
+    }
+    s_docked = docked;
+    const float scale = ConsoleModeScale(docked != 0);
+    if (std::fabs(scale - g_resolutionScale) < 0.001f) return;
+    RT_LOGF("settings", "%s: resolution %.1fx -> %.1fx\n", docked ? "docked" : "handheld",
+            static_cast<double>(g_resolutionScale), static_cast<double>(scale));
+    ApplyResolutionScale(scale);
+}
+
 void FollowConsoleDisplay() noexcept {
+    FollowConsoleMode();
     uint32_t width = 0, height = 0;
     if (!kaihen_display_follow(&width, &height)) return;
     // Aurora resizes its picture on the window's resize event, in this frame's events.
@@ -2018,7 +2070,6 @@ extern "C" int kaihen_power_plugged(void);
 // The picture's size (kaihen_platform.c): docked lines chosen here, and following a dock change.
 extern "C" uint32_t kaihen_docked_lines(void);
 extern "C" void kaihen_set_docked_lines(uint32_t lines);
-extern "C" int kaihen_display_docked_now(void);
 inline bool kaihen_display_docked() { return kaihen_display_docked_now() != 0; }
 constexpr std::array<uint32_t, 3> kConsoleDockedLines{1080, 1440, 2160};
 // Rates the console runs at (it rounds others to its own steps: 1300 runs 1292.8, 2666 runs 2750).
@@ -2149,8 +2200,12 @@ void ConsoleMenuInput(int rows) {
                 }
             }
             if (g_consoleMenuRow == kRowResolution && change != 0) {
-                // Stops at 1x and at the highest step: no wrapping round.
-                const int count = static_cast<int>(kConsoleScales.size());
+                // Stops at 1x and at the highest step: no wrapping round. Handheld, at 3x.
+                int count = static_cast<int>(kConsoleScales.size());
+#if defined(MKW_KAIHEN)
+                while (!kaihen_display_docked() && count > 1 && kConsoleScales[static_cast<size_t>(count - 1)] > kHandheldMaxScale)
+                    --count;
+#endif
                 const int index = std::clamp(ConsoleScaleIndex() + change, 0, count - 1);
                 if (kConsoleScales[static_cast<size_t>(index)] != g_resolutionScale) {
                     RT_LOGF("settings", "resolution %.1fx -> %.1fx\n", static_cast<double>(g_resolutionScale),
@@ -2363,7 +2418,11 @@ void DrawConsoleMenu() {
         };
         char scale[32];
         std::snprintf(scale, sizeof(scale), "%.1fx", static_cast<double>(g_resolutionScale));
+#if defined(MKW_KAIHEN)
+        row(kRowResolution, std::string("Resolution: ") + scale + (kaihen_display_docked() ? " (TV)" : " (handheld)"));
+#else
         row(kRowResolution, std::string("Resolution: ") + scale);
+#endif
 #if defined(MKW_KAIHEN)
         {
             // The picture's size on a TV; the handheld screen is always 1080p.

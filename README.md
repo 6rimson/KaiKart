@@ -146,7 +146,7 @@ choose and B to close. Everything here is saved.
 
 | Setting | Default | Notes |
 |---|---|---|
-| Resolution | 1.0× | How sharp the game draws, 1× to 4×. 3× is the sharpest the handheld screen shows and runs on the system's GPU clock; 4× is for 1440p or 4K on a TV and needs a charger, the GPU at 778 MHz or more, and fast memory on heavy tracks. Change it in menus, not during a race. |
+| Resolution | 1.0× | How sharp the game draws, 1× to 4×, kept separately for the handheld screen and for a TV: docking or undocking switches to that mode's value, and the row says which one you're changing. Handheld it goes up to 3×, the sharpest the screen shows; 4× is for 1440p or 4K on a TV and needs the GPU at 778 MHz or more, and fast memory on heavy tracks. Change it in menus, not during a race. |
 | TV output | 1080p | The picture's size when docked: 1080p, 1440p or 4K, never more than the TV takes. The handheld screen is always 1080p. |
 | Show FPS | Off | |
 | Volume | 100% | |

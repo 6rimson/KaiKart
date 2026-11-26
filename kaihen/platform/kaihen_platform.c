@@ -1013,6 +1013,26 @@ void kaihen_set_docked_lines(uint32_t lines) {
     g_display_reapply = 1;
 }
 
+/* The Resolution row's value on a TV (KAIHEN_TV_RESOLUTION in settings.env, 1 to 4); the game's
+ * Config.toml keeps the handheld one. 0 until set: then the game uses the Config.toml value. */
+static float g_tv_resolution = -1.0f;
+
+float kaihen_tv_resolution(void) {
+    if (g_tv_resolution < 0.0f) {
+        const char *value = getenv("KAIHEN_TV_RESOLUTION");
+        const float scale = value ? strtof(value, NULL) : 0.0f;
+        g_tv_resolution = scale >= 1.0f && scale <= 4.0f ? scale : 0.0f;
+    }
+    return g_tv_resolution;
+}
+
+void kaihen_set_tv_resolution(float scale) {
+    g_tv_resolution = scale;
+    char value[16];
+    snprintf(value, sizeof value, "%.1f", (double)scale);
+    save_setting("KAIHEN_TV_RESOLUTION", value);
+}
+
 void *hbx_switch2_vi_window(void) {
     NWindow *window = nwindowGetDefault();
     u32 width, height;
